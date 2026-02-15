@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  investment-guard:
+    build: .
+    container_name: investment_guard
+    ports:
+      - "8000:8000"
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/code/logs
+      - ./data:/code/data    # SQLite 持久化
+      - ./app:/code/app      # 开发时热更新

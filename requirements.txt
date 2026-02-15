@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+akshare
+pandas
+pydantic-settings
+sqlalchemy
+chinese_calendar
+pytz

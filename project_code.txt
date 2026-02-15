@@ -1,0 +1,821 @@
+﻿
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\routes\quote.py
+==================================================================
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database import get_db, Target
+from app.utils import is_trading_time
+from app.services.data_fetcher import (
+    fetch_stock_realtime, fetch_stock_history,
+    fetch_etf_realtime, fetch_etf_history,
+    fetch_otc_estimation, fetch_otc_history_nav,
+)
+from app.services.analyzer import compute_indicators
+
+router = APIRouter(tags=["琛屾儏鏌ヨ"])
+
+
+@router.get("/quote/{code}", summary="鏌ヨ瀹炴椂琛屾儏/浼板€?)
+def get_quote(code: str, db: Session = Depends(get_db)):
+    """
+    缁熶竴鏌ヨ鎺ュ彛:
+    - 浜ゆ槗鏃堕棿 鈫?涓偂/ETF杩斿洖瀹炴椂浠?鎶€鏈寚鏍囷紝鍦哄鍩洪噾杩斿洖瀹炴椂浼板€?
+    - 闈炰氦鏄撴椂闂?鈫?涓偂/ETF杩斿洖鏀剁洏浠凤紝鍦哄鍩洪噾杩斿洖纭鍑€鍊?
+    """
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise HTTPException(404, f"鏍囩殑 {code} 鏈叧娉紝璇峰厛娣诲姞")
+
+    t_type = target.type.value
+    trading = is_trading_time()
+
+    # ====== 涓偂 ======
+    if t_type == "stock":
+        if trading:
+            rt = fetch_stock_realtime(code)
+            if rt:
+                hist_df = fetch_stock_history(code)
+                indicators = compute_indicators(hist_df, rt['price']) if hist_df is not None else None
+                return {
+                    "code": code, "name": target.name,
+                    "type": "stock", "status": "realtime",
+                    "realtime": rt, "indicators": indicators,
+                }
+        # 鐩樺悗
+        hist_df = fetch_stock_history(code)
+        if hist_df is not None and not hist_df.empty:
+            last = hist_df.iloc[-1]
+            return {
+                "code": code, "name": target.name,
+                "type": "stock", "status": "closed",
+                "close_price": float(last['鏀剁洏']),
+                "close_date": str(last['鏃ユ湡'].date()),
+            }
+
+    # ====== ETF ======
+    elif t_type == "etf":
+        if trading:
+            rt = fetch_etf_realtime(code)
+            if rt:
+                hist_df = fetch_etf_history(code)
+                indicators = compute_indicators(hist_df, rt['price']) if hist_df is not None else None
+                return {
+                    "code": code, "name": target.name,
+                    "type": "etf", "status": "realtime",
+                    "realtime": rt, "indicators": indicators,
+                }
+        hist_df = fetch_etf_history(code)
+        if hist_df is not None and not hist_df.empty:
+            last = hist_df.iloc[-1]
+            return {
+                "code": code, "name": target.name,
+                "type": "etf", "status": "closed",
+                "close_price": float(last['鏀剁洏']),
+                "close_date": str(last['鏃ユ湡'].date()),
+            }
+
+    # ====== 鍦哄鍩洪噾 ======
+    elif t_type == "otc":
+        if trading:
+            est = fetch_otc_estimation(code)
+            if est:
+                return {
+                    "code": code, "name": target.name,
+                    "type": "otc", "status": "estimation",
+                    "data": est,
+                }
+        nav = fetch_otc_history_nav(code)
+        if nav:
+            return {
+                "code": code, "name": target.name,
+                "type": "otc", "status": "closed",
+                "data": nav,
+            }
+
+    raise HTTPException(404, "鏁版嵁鑾峰彇澶辫触")
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\routes\targe.py
+==================================================================
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List
+import datetime
+
+from app.database import get_db, Target, TargetType
+from app.models import TargetCreate, TargetUpdate, TargetResponse
+from app.utils import get_current_time
+
+router = APIRouter(prefix="/targets", tags=["鍏虫敞绠＄悊"])
+
+
+@router.post("/", response_model=TargetResponse, summary="鏂板鍏虫敞鏍囷拷锟斤拷")
+def create_target(payload: TargetCreate, db: Session = Depends(get_db)):
+    """
+    鏂板鍏虫敞鐨勪釜鑲°€佸満鍐呭熀閲?ETF)銆佸満澶栧熀閲?OTC)
+
+    绀轰緥璇锋眰浣?
+    - 涓偂: {"code":"600519","name":"璐靛窞鑼呭彴","type":"stock","buy_bias_rate":-0.08,"sell_bias_rate":0.15}
+    - ETF: {"code":"510300","name":"娌繁300ETF","type":"etf","buy_bias_rate":-0.05,"sell_bias_rate":0.10}
+    - 鍦哄: {"code":"012708","name":"涓滄柟绾㈠惎鎭?,"type":"otc","buy_growth_rate":-2.0,"sell_growth_rate":3.0}
+    """
+    # 妫€鏌ラ噸澶?
+    existing = db.query(Target).filter(Target.code == payload.code).first()
+    if existing:
+        raise HTTPException(400, f"鏍囩殑 {payload.code} 宸插瓨鍦?)
+
+    target = Target(
+        code=payload.code,
+        name=payload.name,
+        type=TargetType(payload.type.value),
+        buy_bias_rate=payload.buy_bias_rate,
+        sell_bias_rate=payload.sell_bias_rate,
+        buy_growth_rate=payload.buy_growth_rate,
+        sell_growth_rate=payload.sell_growth_rate,
+        created_at=get_current_time(),
+    )
+    db.add(target)
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@router.get("/", response_model=List[TargetResponse], summary="鑾峰彇鎵€鏈夊叧娉ㄦ爣鐨?)
+def list_targets(db: Session = Depends(get_db)):
+    return db.query(Target).all()
+
+
+@router.get("/{code}", response_model=TargetResponse, summary="鏌ヨ鍗曚釜鏍囩殑")
+def get_target(code: str, db: Session = Depends(get_db)):
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise HTTPException(404, f"鏍囩殑 {code} 涓嶅瓨鍦?)
+    return target
+
+
+@router.put("/{code}", response_model=TargetResponse, summary="淇敼鏍囩殑闃堝€?)
+def update_target(code: str, payload: TargetUpdate, db: Session = Depends(get_db)):
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise HTTPException(404, f"鏍囩殑 {code} 涓嶅瓨鍦?)
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(target, key, value)
+
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@router.delete("/{code}", summary="鍒犻櫎鍏虫敞鏍囩殑")
+def delete_target(code: str, db: Session = Depends(get_db)):
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise HTTPException(404, f"鏍囩殑 {code} 涓嶅瓨鍦?)
+
+    db.delete(target)
+    db.commit()
+    return {"message": f"宸插垹闄?{code}"}
+
+
+@router.post("/batch", response_model=List[TargetResponse], summary="鎵归噺鏂板鍏虫敞")
+def batch_create_targets(
+    payloads: List[TargetCreate],
+    db: Session = Depends(get_db),
+):
+    """涓€娆℃€ф坊鍔犲涓爣鐨?""
+    results = []
+    for payload in payloads:
+        existing = db.query(Target).filter(Target.code == payload.code).first()
+        if existing:
+            continue  # 璺宠繃宸插瓨鍦ㄧ殑
+
+        target = Target(
+            code=payload.code,
+            name=payload.name,
+            type=TargetType(payload.type.value),
+            buy_bias_rate=payload.buy_bias_rate,
+            sell_bias_rate=payload.sell_bias_rate,
+            buy_growth_rate=payload.buy_growth_rate,
+            sell_growth_rate=payload.sell_growth_rate,
+            created_at=get_current_time(),
+        )
+        db.add(target)
+        results.append(target)
+
+    db.commit()
+    for t in results:
+        db.refresh(t)
+    return results
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\services\analyzer.py
+==================================================================
+
+import pandas as pd
+from typing import Optional, Dict, Any
+
+
+def compute_indicators(df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
+    """
+    璁＄畻鎶€鏈寚鏍? MA5, MA20, MA250, 涔栫鐜?
+    鐢ㄥ疄鏃朵环瑕嗙洊鏈€鍚庝竴琛岋紝鐩樹腑鏇村噯纭?
+    """
+    if df is None or len(df) < 250:
+        return None
+
+    close = df['鏀剁洏'].copy()
+    close.iloc[-1] = current_price
+
+    ma5 = close.rolling(5).mean().iloc[-1]
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma250 = close.rolling(250).mean().iloc[-1]
+    bias_rate = (current_price - ma250) / ma250
+
+    return {
+        "price": round(current_price, 3),
+        "ma5": round(ma5, 3),
+        "ma20": round(ma20, 3),
+        "ma250": round(ma250, 3),
+        "bias_rate": round(bias_rate, 4),
+        "bias_percent": f"{bias_rate:.2%}",
+    }
+
+
+def check_signal(
+    indicators: Dict[str, Any],
+    buy_bias_rate: float | None = None,
+    sell_bias_rate: float | None = None,
+    buy_growth_rate: float | None = None,
+    sell_growth_rate: float | None = None,
+) -> Optional[str]:
+    """
+    鍒ゆ柇涔板崠淇″彿
+    杩斿洖: 'BUY' / 'SELL' / None
+    """
+    if not indicators:
+        return None
+
+    # 涔板叆淇″彿
+    if buy_bias_rate is not None and indicators.get('bias_rate') is not None:
+        if indicators['bias_rate'] <= buy_bias_rate:
+            return 'BUY'
+
+    if buy_growth_rate is not None and indicators.get('growth_rate') is not None:
+        if indicators['growth_rate'] <= buy_growth_rate:
+            return 'BUY'
+
+    # 鍗栧嚭淇″彿
+    if sell_bias_rate is not None and indicators.get('bias_rate') is not None:
+        if indicators['bias_rate'] >= sell_bias_rate:
+            return 'SELL'
+
+    if sell_growth_rate is not None and indicators.get('growth_rate') is not None:
+        if indicators['growth_rate'] >= sell_growth_rate:
+            return 'SELL'
+
+    return None
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\services\data_fetcher.py
+==================================================================
+
+import akshare as ak
+import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== 涓偂 ====================
+
+def fetch_stock_realtime(code: str) -> dict | None:
+    """鑾峰彇涓偂瀹炴椂琛屾儏蹇収"""
+    try:
+        df = ak.stock_zh_a_spot_em()
+        row = df[df['浠ｇ爜'] == code]
+        if row.empty:
+            return None
+        row = row.iloc[0]
+        return {
+            'price': float(row['鏈€鏂颁环']),
+            'change_pct': float(row['娑ㄨ穼骞?]),
+            'volume': float(row['锟斤拷浜ら噺']),
+            'amount': float(row['鎴愪氦棰?]),
+            'high': float(row['鏈€楂?]),
+            'low': float(row['鏈€浣?]),
+            'open': float(row['浠婂紑']),
+            'pre_close': float(row['鏄ㄦ敹']),
+        }
+    except Exception as e:
+        logger.error(f"涓偂瀹炴椂鏁版嵁鑾峰彇澶辫触 {code}: {e}")
+        return None
+
+
+def fetch_stock_history(code: str) -> pd.DataFrame | None:
+    """鑾峰彇涓偂鍘嗗彶鏃绾?""
+    try:
+        df = ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date="20230101", adjust="qfq"
+        )
+        if df.empty:
+            return None
+        df['鏃ユ湡'] = pd.to_datetime(df['鏃ユ湡'])
+        df = df.sort_values('鏃ユ湡').reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.error(f"涓偂鍘嗗彶鏁版嵁鑾峰彇澶辫触 {code}: {e}")
+        return None
+
+
+# ==================== 鍦哄唴鍩洪噾 (ETF) ====================
+
+def fetch_etf_realtime(code: str) -> dict | None:
+    """鑾峰彇ETF瀹炴椂琛屾儏蹇収"""
+    try:
+        df = ak.fund_etf_spot_em()
+        row = df[df['浠ｇ爜'] == code]
+        if row.empty:
+            return None
+        row = row.iloc[0]
+        return {
+            'price': float(row['鏈€鏂颁环']),
+            'change_pct': float(row['娑ㄨ穼骞?]),
+        }
+    except Exception as e:
+        logger.error(f"ETF瀹炴椂鏁版嵁鑾峰彇澶辫触 {code}: {e}")
+        return None
+
+
+def fetch_etf_history(code: str) -> pd.DataFrame | None:
+    """鑾峰彇ETF鍘嗗彶鏃绾?""
+    try:
+        df = ak.fund_etf_hist_em(
+            symbol=code, period="daily",
+            start_date="20230101", adjust="qfq"
+        )
+        if df.empty:
+            return None
+        df['鏃ユ湡'] = pd.to_datetime(df['鏃ユ湡'])
+        df = df.sort_values('鏃ユ湡').reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.error(f"ETF鍘嗗彶鏁版嵁鑾峰彇澶辫触 {code}: {e}")
+        return None
+
+
+# ==================== 鍦哄鍩洪噾 (OTC) ====================
+
+def fetch_otc_estimation(code: str) -> dict | None:
+    """鑾峰彇鍦哄鍩洪噾瀹炴椂浼板€?""
+    try:
+        df = ak.fund_value_estimation_em(symbol=code)
+        if df.empty:
+            return None
+        record = df.iloc[0]
+        return {
+            "nav": float(record['浼扮畻鍑€鍊?]),
+            "growth_rate": float(record['浼扮畻澧為暱鐜?]),
+            "time": str(record['浼扮畻鏃堕棿']),
+        }
+    except Exception as e:
+        logger.error(f"鍦哄浼板€艰幏鍙栧け璐?{code}: {e}")
+        return None
+
+
+def fetch_otc_history_nav(code: str) -> dict | None:
+    """鑾峰彇鍦哄鍩洪噾鏈€杩戜竴澶╃‘璁ゅ噣鍊?""
+    try:
+        df = ak.fund_open_fund_info_em(symbol=code, indicator="鍗曚綅鍑€鍊艰蛋鍔?)
+        if df.empty:
+            return None
+        last = df.iloc[-1]
+        return {
+            "nav": float(last['鍗曚綅鍑€鍊?]),
+            "date": str(last['鍑€鍊兼棩鏈?]),
+        }
+    except Exception as e:
+        logger.error(f"鍦哄鍘嗗彶鍑€鍊艰幏鍙栧け璐?{code}: {e}")
+        return None
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\services\notifier.py
+==================================================================
+
+import smtplib
+from email.mime.text import MIMEText
+from email.header import Header
+from app.config import settings
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def send_email(subject: str, content: str):
+    """閫氳繃 QQ 閭 SMTP 鍙戦€佹姤璀﹂偖浠?""
+    message = MIMEText(content, 'plain', 'utf-8')
+    message['From'] = Header("Investment Guard", 'utf-8')
+    message['To'] = Header("Investor", 'utf-8')
+    message['Subject'] = Header(subject, 'utf-8')
+
+    try:
+        server = smtplib.SMTP_SSL(settings.SMTP_SERVER, settings.SMTP_PORT)
+        server.login(settings.SENDER_EMAIL, settings.EMAIL_PASSWORD)
+        server.sendmail(
+            settings.SENDER_EMAIL,
+            settings.RECEIVER_EMAIL,
+            message.as_string()
+        )
+        server.quit()
+        logger.info(f"閭欢宸插彂閫? {subject}")
+    except Exception as e:
+        logger.error(f"閭欢鍙戦€佸け璐? {e}")
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\config.py
+==================================================================
+
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    # 閭欢閰嶇疆
+    SMTP_SERVER: str = "smtp.qq.com"
+    SMTP_PORT: int = 465
+    SENDER_EMAIL: str
+    EMAIL_PASSWORD: str
+    RECEIVER_EMAIL: str
+
+    # 鐩戞帶杞闂撮殧锛堢锛?
+    # akshare 鍏嶈垂鎺ュ彛鏈夐鐜囬檺鍒讹紝鏍囩殑灏戝彲浠?3~5 绉掞紝澶氱殑璇?10~15 绉?
+    POLL_INTERVAL_SECONDS: int = 5
+
+    # SQLite 鏁版嵁搴撹矾寰?
+    DATABASE_URL: str = "sqlite:///./data/investment_guard.db"
+
+    class Config:
+        env_file = ".env"
+
+
+settings = Settings()
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\database.py
+==================================================================
+
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Enum as SAEnum
+from sqlalchemy.orm import declarative_base, sessionmaker
+from app.config import settings
+import enum
+import os
+
+# 纭繚 data 鐩綍瀛樺湪
+os.makedirs("../data", exist_ok=True)
+
+engine = create_engine(
+    settings.DATABASE_URL,
+    connect_args={"check_same_thread": False},  # SQLite 闇€瑕?
+    echo=False,
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class TargetType(str, enum.Enum):
+    STOCK = "stock"
+    ETF = "etf"
+    OTC = "otc"
+
+
+class Target(Base):
+    __tablename__ = "targets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(10), unique=True, nullable=False, index=True)
+    name = Column(String(50), nullable=False)
+    type = Column(SAEnum(TargetType), nullable=False)
+
+    # 涔板叆闃堝€?
+    buy_bias_rate = Column(Float, nullable=True)       # 涓偂/ETF: 涔栫鐜囦拱鍏ラ槇鍊?
+    buy_growth_rate = Column(Float, nullable=True)     # 鍦哄鍩洪噾: 浼扮畻璺屽箙涔板叆闃堝€?
+
+    # 鍗栧嚭闃堝€?
+    sell_bias_rate = Column(Float, nullable=True)      # 涓偂/ETF: 涔栫鐜囧崠鍑洪槇鍊?
+    sell_growth_rate = Column(Float, nullable=True)    # 鍦哄鍩洪噾: 浼扮畻娑ㄥ箙鍗栧嚭闃堝€?
+
+    created_at = Column(DateTime, nullable=True)
+
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\main.py
+==================================================================
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database import get_db, Target
+from app.utils import is_trading_time
+from app.services.data_fetcher import (
+    fetch_stock_realtime, fetch_stock_history,
+    fetch_etf_realtime, fetch_etf_history,
+    fetch_otc_estimation, fetch_otc_history_nav,
+)
+from app.services.analyzer import compute_indicators
+
+router = APIRouter(tags=["琛屾儏鏌ヨ"])
+
+
+@router.get("/quote/{code}", summary="鏌ヨ瀹炴椂琛屾儏/浼板€?)
+def get_quote(code: str, db: Session = Depends(get_db)):
+    """
+    缁熶竴鏌ヨ鎺ュ彛:
+    - 浜ゆ槗鏃堕棿 鈫?涓偂/ETF杩斿洖瀹炴椂浠?鎶€鏈寚鏍囷紝鍦哄鍩洪噾杩斿洖瀹炴椂浼板€?
+    - 闈炰氦鏄撴椂闂?鈫?涓偂/ETF杩斿洖鏀剁洏浠凤紝鍦哄鍩洪噾杩斿洖纭鍑€鍊?
+    """
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise HTTPException(404, f"鏍囩殑 {code} 鏈叧娉紝璇峰厛娣诲姞")
+
+    t_type = target.type.value
+    trading = is_trading_time()
+
+    # ====== 涓偂 ======
+    if t_type == "stock":
+        if trading:
+            rt = fetch_stock_realtime(code)
+            if rt:
+                hist_df = fetch_stock_history(code)
+                indicators = compute_indicators(hist_df, rt['price']) if hist_df is not None else None
+                return {
+                    "code": code, "name": target.name,
+                    "type": "stock", "status": "realtime",
+                    "realtime": rt, "indicators": indicators,
+                }
+        # 鐩樺悗
+        hist_df = fetch_stock_history(code)
+        if hist_df is not None and not hist_df.empty:
+            last = hist_df.iloc[-1]
+            return {
+                "code": code, "name": target.name,
+                "type": "stock", "status": "closed",
+                "close_price": float(last['鏀剁洏']),
+                "close_date": str(last['鏃ユ湡'].date()),
+            }
+
+    # ====== ETF ======
+    elif t_type == "etf":
+        if trading:
+            rt = fetch_etf_realtime(code)
+            if rt:
+                hist_df = fetch_etf_history(code)
+                indicators = compute_indicators(hist_df, rt['price']) if hist_df is not None else None
+                return {
+                    "code": code, "name": target.name,
+                    "type": "etf", "status": "realtime",
+                    "realtime": rt, "indicators": indicators,
+                }
+        hist_df = fetch_etf_history(code)
+        if hist_df is not None and not hist_df.empty:
+            last = hist_df.iloc[-1]
+            return {
+                "code": code, "name": target.name,
+                "type": "etf", "status": "closed",
+                "close_price": float(last['鏀剁洏']),
+                "close_date": str(last['鏃ユ湡'].date()),
+            }
+
+    # ====== 鍦哄鍩洪噾 ======
+    elif t_type == "otc":
+        if trading:
+            est = fetch_otc_estimation(code)
+            if est:
+                return {
+                    "code": code, "name": target.name,
+                    "type": "otc", "status": "estimation",
+                    "data": est,
+                }
+        nav = fetch_otc_history_nav(code)
+        if nav:
+            return {
+                "code": code, "name": target.name,
+                "type": "otc", "status": "closed",
+                "data": nav,
+            }
+
+    raise HTTPException(404, "鏁版嵁鑾峰彇澶辫触")
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\models.py
+==================================================================
+
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
+from enum import Enum
+
+
+# ========== 鏋氫妇 ==========
+class TargetTypeEnum(str, Enum):
+    stock = "stock"
+    etf = "etf"
+    otc = "otc"
+
+
+# ========== 鍏虫敞鏍囩殑 ==========
+class TargetCreate(BaseModel):
+    code: str = Field(..., description="浠ｇ爜锛屽 600519銆?10300銆?12708")
+    name: str = Field(..., description="鍚嶇О锛屽 璐靛窞鑼呭彴")
+    type: TargetTypeEnum = Field(..., description="绫诲瀷: stock / etf / otc")
+    buy_bias_rate: Optional[float] = Field(None, description="涓偂/ETF 涔栫鐜囦拱鍏ラ槇鍊硷紝濡?-0.08")
+    sell_bias_rate: Optional[float] = Field(None, description="涓偂/ETF 涔栫鐜囧崠鍑洪槇鍊硷紝濡?0.15")
+    buy_growth_rate: Optional[float] = Field(None, description="鍦哄鍩洪噾 浼扮畻璺屽箙涔板叆闃堝€硷紝濡?-2.0")
+    sell_growth_rate: Optional[float] = Field(None, description="鍦哄鍩洪噾 浼扮畻娑ㄥ箙鍗栧嚭闃堝€硷紝濡?3.0")
+
+
+class TargetUpdate(BaseModel):
+    name: Optional[str] = None
+    buy_bias_rate: Optional[float] = None
+    sell_bias_rate: Optional[float] = None
+    buy_growth_rate: Optional[float] = None
+    sell_growth_rate: Optional[float] = None
+
+
+class TargetResponse(BaseModel):
+    id: int
+    code: str
+    name: str
+    type: str
+    buy_bias_rate: Optional[float] = None
+    sell_bias_rate: Optional[float] = None
+    buy_growth_rate: Optional[float] = None
+    sell_growth_rate: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ========== 鏌ヨ鍝嶅簲 ==========
+class HealthResponse(BaseModel):
+    status: str
+    trading_time: bool
+    monitored_count: int
+
+
+class RealtimeData(BaseModel):
+    price: float
+    change_pct: Optional[float] = None
+    volume: Optional[float] = None
+    amount: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    open: Optional[float] = None
+    pre_close: Optional[float] = None
+
+
+class IndicatorData(BaseModel):
+    price: float
+    ma5: float
+    ma20: float
+    ma250: float
+    bias_rate: float
+    bias_percent: str
+
+
+class QuoteResponse(BaseModel):
+    code: str
+    name: str
+    type: str
+    status: str  # realtime / estimation / closed
+    realtime: Optional[Dict[str, Any]] = None
+    indicators: Optional[Dict[str, Any]] = None
+    data: Optional[Dict[str, Any]] = None
+    close_price: Optional[float] = None
+    close_date: Optional[str] = None
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\app\utils.py
+==================================================================
+
+import datetime
+import pytz
+from chinese_calendar import is_workday
+
+SHANGHAI_TZ = pytz.timezone('Asia/Shanghai')
+
+
+def get_current_time():
+    """鑾峰彇褰撳墠鐨勪笂娴锋椂闂?""
+    return datetime.datetime.now(SHANGHAI_TZ)
+
+
+def is_trading_time() -> bool:
+    """
+    鍒ゆ柇褰撳墠鏄惁涓?A鑲?浜ゆ槗鏃堕棿
+    瑙勫垯: 宸ヤ綔鏃ワ紙鎺掗櫎娉曞畾鑺傚亣鏃ワ級 09:30-11:30, 13:00-15:00
+    """
+    now = get_current_time()
+
+    # 宸ヤ綔鏃ュ垽鏂紙鍖呭惈娉曞畾鑺傚亣鏃ユ帓闄?+ 璋冧紤琛ョ彮锛?
+    if not is_workday(now.date()):
+        return False
+
+    current_time = now.time()
+
+    am_start = datetime.time(9, 30)
+    am_end = datetime.time(11, 30)
+    pm_start = datetime.time(13, 0)
+    pm_end = datetime.time(15, 0)
+
+    return (am_start <= current_time <= am_end) or (pm_start <= current_time <= pm_end)
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\.env
+==================================================================
+
+# ================= 閭欢閰嶇疆 =================
+SMTP_SERVER=smtp.qq.com
+SMTP_PORT=465
+SENDER_EMAIL=123456789@qq.com
+EMAIL_PASSWORD=abcdefghijklmnop
+RECEIVER_EMAIL=123456789@qq.com
+
+# ================= 鐩戞帶閰嶇疆 =================
+# 杞闂撮殧锛堢锛夛紝寤鸿 5~15锛屾爣鐨勮秺澶氶棿闅旇秺闀?
+POLL_INTERVAL_SECONDS=5
+
+# ================= 鏁版嵁搴?=================
+DATABASE_URL=sqlite:///./data/investment_guard.db
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\docker-compose.yml
+==================================================================
+
+version: '3.8'
+
+services:
+  investment-guard:
+    build: .
+    container_name: investment_guard
+    ports:
+      - "8000:8000"
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/code/logs
+      - ./data:/code/data    # SQLite 鎸佷箙鍖?
+      - ./app:/code/app      # 寮€鍙戞椂鐑洿鏂
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\Dockerfile
+==================================================================
+
+FROM docker.m.daocloud.io/library/python:3.11-slim
+
+WORKDIR /code
+
+# 鏃跺尯
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 瀹夎渚濊禆
+COPY ./requirements.txt /code/requirements.txt
+RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+
+# 澶嶅埗椤圭洰
+COPY ./app /code/app
+
+# 鏁版嵁鐩綍锛圫QLite锛?
+RUN mkdir -p /code/data
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+==================================================================
+FILE PATH: D:\project\myQuant\myQuant\requirements.txt
+==================================================================
+
+fastapi
+uvicorn[standard]
+akshare
+pandas
+pydantic-settings
+sqlalchemy
+chinese_calendar
+pytz
