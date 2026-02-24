@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 ALERT_HISTORY = {}
 ALERT_LOCK = threading.Lock()
 
-# 历史K线缓存
+# 历史K线缓存（加锁保护）
 HIST_CACHE = {}
 HIST_CACHE_DATE = None
+HIST_CACHE_LOCK = threading.Lock()
 
 
 def _is_alerted(code, signal):
@@ -52,17 +53,30 @@ def _mark_alerted(code, signal):
 
 
 def _get_history(code, t_type):
+    """获取历史K线（带线程安全缓存，每日刷新）"""
     global HIST_CACHE, HIST_CACHE_DATE
     today = get_current_time().strftime("%Y-%m-%d")
-    if HIST_CACHE_DATE != today:
-        HIST_CACHE = {}
-        HIST_CACHE_DATE = today
-    if code not in HIST_CACHE:
-        if t_type == "stock":
-            HIST_CACHE[code] = fetch_stock_history(code)
-        elif t_type == "etf":
-            HIST_CACHE[code] = fetch_etf_history(code)
-    return HIST_CACHE.get(code)
+
+    with HIST_CACHE_LOCK:
+        if HIST_CACHE_DATE != today:
+            HIST_CACHE = {}
+            HIST_CACHE_DATE = today
+            logger.info("历史K线缓存已刷新（新交易日）")
+
+        if code in HIST_CACHE:
+            return HIST_CACHE[code]
+
+    # 在锁外执行耗时的网络请求
+    hist = None
+    if t_type == "stock":
+        hist = fetch_stock_history(code)
+    elif t_type == "etf":
+        hist = fetch_etf_history(code)
+
+    with HIST_CACHE_LOCK:
+        HIST_CACHE[code] = hist
+
+    return hist
 
 
 def _load_targets_from_db():
@@ -93,7 +107,7 @@ async def monitor_loop():
             continue
 
         logger.info("执行一轮扫描...")
-        targets = _load_targets_from_db()
+        targets = await asyncio.to_thread(_load_targets_from_db)
 
         if not targets:
             logger.info("暂无关注标的，等待下一轮...")
@@ -111,14 +125,14 @@ async def monitor_loop():
                 # ====== 个股 / ETF ======
                 if t_type in ("stock", "etf"):
                     if t_type == "stock":
-                        rt = fetch_stock_realtime(code)
+                        rt = await asyncio.to_thread(fetch_stock_realtime, code)
                     else:
-                        rt = fetch_etf_realtime(code)
+                        rt = await asyncio.to_thread(fetch_etf_realtime, code)
                     if not rt:
                         continue
 
                     price = rt["price"]
-                    hist_df = _get_history(code, t_type)
+                    hist_df = await asyncio.to_thread(_get_history, code, t_type)
                     if hist_df is None:
                         continue
 
@@ -133,7 +147,7 @@ async def monitor_loop():
                     )
 
                     if signal and not _is_alerted(code, signal):
-                        emoji = "BUY" if signal == "BUY" else "SELL"
+                        emoji = "🟢 BUY" if signal == "BUY" else "🔴 SELL"
                         label = "个股" if t_type == "stock" else "ETF"
                         msg = (
                             "【{}信号 {}】{}({})\n"
@@ -149,7 +163,7 @@ async def monitor_loop():
 
                 # ====== 场外基金 ======
                 elif t_type == "otc":
-                    est = fetch_otc_estimation(code)
+                    est = await asyncio.to_thread(fetch_otc_estimation, code)
                     if not est:
                         continue
 
@@ -161,7 +175,7 @@ async def monitor_loop():
                     )
 
                     if signal and not _is_alerted(code, signal):
-                        emoji = "BUY" if signal == "BUY" else "SELL"
+                        emoji = "🟢 BUY" if signal == "BUY" else "🔴 SELL"
                         msg = (
                             "【{}信号 场外】{}({})\n"
                             "实时估值: {}\n"
@@ -180,7 +194,8 @@ async def monitor_loop():
                 logger.error("监控 {}({}) 出错: {}".format(name, code, e))
 
         if alerts:
-            send_email(
+            await asyncio.to_thread(
+                send_email,
                 "【交易信号】发现 {} 个信号".format(len(alerts)),
                 "\n" + ("-" * 30 + "\n").join(alerts),
             )
@@ -197,6 +212,10 @@ async def lifespan(the_app: FastAPI):
     logger.info("系统启动: 高频监控已启动，间隔 %d 秒", settings.POLL_INTERVAL_SECONDS)
     yield
     task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
     logger.info("系统关闭: 监控已停止")
 
 

@@ -1,5 +1,11 @@
 import pandas as pd
+import logging
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+# 计算 MA250 所需的最少数据行数
+MIN_HISTORY_ROWS = 250
 
 
 def compute_indicators(df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
@@ -7,7 +13,11 @@ def compute_indicators(df: pd.DataFrame, current_price: float) -> Optional[Dict[
     计算技术指标: MA5, MA20, MA250, 乖离率
     用实时价覆盖最后一行，盘中更准确
     """
-    if df is None or len(df) < 250:
+    if df is None or len(df) < MIN_HISTORY_ROWS:
+        logger.warning(
+            f"历史数据不足: 当前 {len(df) if df is not None else 0} 行, "
+            f"需要至少 {MIN_HISTORY_ROWS} 行才能计算 MA250"
+        )
         return None
 
     close = df['收盘'].copy()
@@ -37,21 +47,13 @@ def check_signal(
 ) -> Optional[str]:
     """
     判断买卖信号
+    优先级: 卖出 > 买入（保守策略，优先止盈/止损）
     返回: 'BUY' / 'SELL' / None
     """
     if not indicators:
         return None
 
-    # 买入信号
-    if buy_bias_rate is not None and indicators.get('bias_rate') is not None:
-        if indicators['bias_rate'] <= buy_bias_rate:
-            return 'BUY'
-
-    if buy_growth_rate is not None and indicators.get('growth_rate') is not None:
-        if indicators['growth_rate'] <= buy_growth_rate:
-            return 'BUY'
-
-    # 卖出信号
+    # === 卖出信号（优先判断，保守策略） ===
     if sell_bias_rate is not None and indicators.get('bias_rate') is not None:
         if indicators['bias_rate'] >= sell_bias_rate:
             return 'SELL'
@@ -59,5 +61,14 @@ def check_signal(
     if sell_growth_rate is not None and indicators.get('growth_rate') is not None:
         if indicators['growth_rate'] >= sell_growth_rate:
             return 'SELL'
+
+    # === 买入信号 ===
+    if buy_bias_rate is not None and indicators.get('bias_rate') is not None:
+        if indicators['bias_rate'] <= buy_bias_rate:
+            return 'BUY'
+
+    if buy_growth_rate is not None and indicators.get('growth_rate') is not None:
+        if indicators['growth_rate'] <= buy_growth_rate:
+            return 'BUY'
 
     return None
