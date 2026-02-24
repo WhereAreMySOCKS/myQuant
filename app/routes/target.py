@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-import datetime
+import logging
 
 from app.database import get_db, Target, TargetType
 from app.models import TargetCreate, TargetUpdate, TargetResponse
 from app.utils import get_current_time
+from app.services.code_resolver import resolve_code
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/targets", tags=["关注管理"])
 
@@ -14,21 +17,27 @@ router = APIRouter(prefix="/targets", tags=["关注管理"])
 def create_target(payload: TargetCreate, db: Session = Depends(get_db)):
     """
     新增关注的个股、场内基金(ETF)、场外基金(OTC)
+    只需传入代码和阈值，系统自动识别名称和类型
 
     示例请求体:
-    - 个股: {"code":"600519","name":"贵州茅台","type":"stock","buy_bias_rate":-0.08,"sell_bias_rate":0.15}
-    - ETF: {"code":"510300","name":"沪深300ETF","type":"etf","buy_bias_rate":-0.05,"sell_bias_rate":0.10}
-    - 场外: {"code":"012708","name":"东方红启恒","type":"otc","buy_growth_rate":-2.0,"sell_growth_rate":3.0}
+    - 个股: {"code":"600519","buy_bias_rate":-0.08,"sell_bias_rate":0.15}
+    - ETF: {"code":"510300","buy_bias_rate":-0.05,"sell_bias_rate":0.10}
+    - 场外: {"code":"012708","buy_growth_rate":-2.0,"sell_growth_rate":3.0}
     """
     # 检查重复
     existing = db.query(Target).filter(Target.code == payload.code).first()
     if existing:
         raise HTTPException(400, f"标的 {payload.code} 已存在")
 
+    # 自动识别代码
+    resolved = resolve_code(payload.code)
+    if not resolved:
+        raise HTTPException(404, f"无法识别代码 {payload.code}，请确认代码是否正确")
+
     target = Target(
-        code=payload.code,
-        name=payload.name,
-        type=TargetType(payload.type.value),
+        code=resolved["code"],
+        name=resolved["name"],
+        type=TargetType(resolved["type"]),
         buy_bias_rate=payload.buy_bias_rate,
         sell_bias_rate=payload.sell_bias_rate,
         buy_growth_rate=payload.buy_growth_rate,
@@ -38,6 +47,11 @@ def create_target(payload: TargetCreate, db: Session = Depends(get_db)):
     db.add(target)
     db.commit()
     db.refresh(target)
+
+    logger.info(
+        f"新增关注: {resolved['name']}({resolved['code']}) "
+        f"类型={resolved['type']}"
+    )
     return target
 
 
@@ -85,17 +99,28 @@ def batch_create_targets(
     payloads: List[TargetCreate],
     db: Session = Depends(get_db),
 ):
-    """一次性添加多个标的"""
+    """
+    一次性添加多个标的
+    已存在的自动跳过，无法识别的记录警告并跳过
+    """
     results = []
     for payload in payloads:
+        # 跳过已存在
         existing = db.query(Target).filter(Target.code == payload.code).first()
         if existing:
-            continue  # 跳过已存在的
+            logger.info(f"批量新增跳过（已存在）: {payload.code}")
+            continue
+
+        # 自动识别
+        resolved = resolve_code(payload.code)
+        if not resolved:
+            logger.warning(f"批量新增跳过（无法识别）: {payload.code}")
+            continue
 
         target = Target(
-            code=payload.code,
-            name=payload.name,
-            type=TargetType(payload.type.value),
+            code=resolved["code"],
+            name=resolved["name"],
+            type=TargetType(resolved["type"]),
             buy_bias_rate=payload.buy_bias_rate,
             sell_bias_rate=payload.sell_bias_rate,
             buy_growth_rate=payload.buy_growth_rate,
@@ -108,4 +133,6 @@ def batch_create_targets(
     db.commit()
     for t in results:
         db.refresh(t)
+
+    logger.info(f"批量新增完成: 成功 {len(results)} 个")
     return results

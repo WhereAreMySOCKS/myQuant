@@ -12,9 +12,8 @@ class TargetTypeEnum(str, Enum):
 
 # ========== 关注标的 ==========
 class TargetCreate(BaseModel):
+    """新增关注 — 只需传入代码 + 阈值，名称和类型自动识别"""
     code: str = Field(..., description="代码，如 600519、510300、012708")
-    name: str = Field(..., description="名称，如 贵州茅台")
-    type: TargetTypeEnum = Field(..., description="类型: stock / etf / otc")
     buy_bias_rate: Optional[float] = Field(None, description="个股/ETF 乖离率买入阈值，如 -0.08")
     sell_bias_rate: Optional[float] = Field(None, description="个股/ETF 乖离率卖出阈值，如 0.15")
     buy_growth_rate: Optional[float] = Field(None, description="场外基金 估算跌幅买入阈值，如 -2.0")

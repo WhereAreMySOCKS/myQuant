@@ -4,14 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="5929d3e8-eefc-438b-8c20-a97538a9c755" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+    <list default="true" id="5929d3e8-eefc-438b-8c20-a97538a9c755" name="Changes" comment="AI修复">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/analyzer.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/analyzer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/data_fetcher.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/data_fetcher.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/services/notifier.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/services/notifier.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/project_code.txt" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -72,11 +66,35 @@
       <option name="presentableId" value="Default" />
       <updated>1771087350335</updated>
       <workItem from="1771087351732" duration="82000" />
-      <workItem from="1771912355569" duration="3536000" />
+      <workItem from="1771912355569" duration="5218000" />
     </task>
+    <task id="LOCAL-00001" summary="AI修复">
+      <option name="closed" value="true" />
+      <created>1771916126418</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1771916126418</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="AI修复" />
+    <option name="LAST_COMMIT_MESSAGE" value="AI修复" />
   </component>
 </project>
