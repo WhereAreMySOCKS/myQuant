@@ -5,7 +5,6 @@ from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import declarative_base, sessionmaker
 from app.config import settings
 
-# 修复: 去掉 "../"
 os.makedirs("data", exist_ok=True)
 
 engine = create_engine(
@@ -25,6 +24,7 @@ class TargetType(str, enum.Enum):
 
 
 class Target(Base):
+    """用户关注的标的"""
     __tablename__ = "targets"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -36,6 +36,16 @@ class Target(Base):
     buy_growth_rate = Column(Float, nullable=True)
     sell_growth_rate = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=True)
+
+
+class SecurityInfo(Base):
+    """标的信息缓存表（个股 + ETF + 场外基金）"""
+    __tablename__ = "security_info"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(10), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    type = Column(String(10), nullable=False)  # stock / etf / otc
 
 
 def init_db():

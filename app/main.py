@@ -16,6 +16,7 @@ from app.services.data_fetcher import (
 )
 from app.services.analyzer import compute_indicators, check_signal
 from app.services.notifier import send_email
+from app.services.code_resolver import init_security_info
 from app.routes import target as target_router
 from app.routes import quote as quote_router
 
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 ALERT_HISTORY = {}
 ALERT_LOCK = threading.Lock()
 
-# 历史K线缓存（加锁保护）
+# 历史K线缓存
 HIST_CACHE = {}
 HIST_CACHE_DATE = None
 HIST_CACHE_LOCK = threading.Lock()
@@ -53,7 +54,6 @@ def _mark_alerted(code, signal):
 
 
 def _get_history(code, t_type):
-    """获取历史K线（带线程安全缓存，每日刷新）"""
     global HIST_CACHE, HIST_CACHE_DATE
     today = get_current_time().strftime("%Y-%m-%d")
 
@@ -66,7 +66,6 @@ def _get_history(code, t_type):
         if code in HIST_CACHE:
             return HIST_CACHE[code]
 
-    # 在锁外执行耗时的网络请求
     hist = None
     if t_type == "stock":
         hist = fetch_stock_history(code)
@@ -122,7 +121,6 @@ async def monitor_loop():
             t_type = t["type"]
 
             try:
-                # ====== 个股 / ETF ======
                 if t_type in ("stock", "etf"):
                     if t_type == "stock":
                         rt = await asyncio.to_thread(fetch_stock_realtime, code)
@@ -161,7 +159,6 @@ async def monitor_loop():
                         alerts.append(msg)
                         _mark_alerted(code, signal)
 
-                # ====== 场外基金 ======
                 elif t_type == "otc":
                     est = await asyncio.to_thread(fetch_otc_estimation, code)
                     if not est:
@@ -206,11 +203,20 @@ async def monitor_loop():
 # ========== FastAPI 生命周期 ==========
 @asynccontextmanager
 async def lifespan(the_app: FastAPI):
+    # 1. 建表
     init_db()
-    logger.info("数据库初始化完成")
+    logger.info("数据库表结构初始化完成")
+
+    # 2. 初始化标的信息缓存（首次启动会拉取全量数据，耗时约 10~15 秒）
+    logger.info("检查标的信息缓存表...")
+    await asyncio.to_thread(init_security_info)
+
+    # 3. 启动监控
     task = asyncio.create_task(monitor_loop())
     logger.info("系统启动: 高频监控已启动，间隔 %d 秒", settings.POLL_INTERVAL_SECONDS)
+
     yield
+
     task.cancel()
     try:
         await task
@@ -226,7 +232,6 @@ app = FastAPI(
     version="3.0.0",
 )
 
-# 注册路由
 app.include_router(target_router.router)
 app.include_router(quote_router.router)
 

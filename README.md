@@ -84,8 +84,6 @@ POST /targets/
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `code` | string | ✅ | 标的代码，如 `"600519"`、`"510300"`、`"012708"` |
-| `name` | string | ✅ | 标的名称，如 `"贵州茅台"` |
-| `type` | string | ✅ | 标的类型：`"stock"` / `"etf"` / `"otc"`（详见 [附录 B](#附录-b枚举值)） |
 | `buy_bias_rate` | float | ❌ | 个股/ETF 乖离率买入阈值，如 `-0.08` 表示低于年线 8% 时触发���入信号 |
 | `sell_bias_rate` | float | ❌ | 个股/ETF 乖离率卖出阈值，如 `0.15` 表示高于年线 15% 时触发卖出信号 |
 | `buy_growth_rate` | float | ❌ | 场外基金估算跌幅买入阈值，如 `-2.0` 表示估算跌 2% 时触发 |
@@ -103,8 +101,6 @@ POST /targets/
 ```json
 {
   "code": "600519",
-  "name": "贵州茅台",
-  "type": "stock",
   "buy_bias_rate": -0.08,
   "sell_bias_rate": 0.15
 }
@@ -115,8 +111,6 @@ POST /targets/
 ```json
 {
   "code": "510300",
-  "name": "沪深300ETF",
-  "type": "etf",
   "buy_bias_rate": -0.05,
   "sell_bias_rate": 0.10
 }
@@ -127,8 +121,6 @@ POST /targets/
 ```json
 {
   "code": "012708",
-  "name": "东方红启恒",
-  "type": "otc",
   "buy_growth_rate": -2.0,
   "sell_growth_rate": 3.0
 }
