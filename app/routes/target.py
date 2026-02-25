@@ -101,30 +101,35 @@ def batch_create_targets(
     for payload in payloads:
         existing = db.query(Target).filter(Target.code == payload.code).first()
         if existing:
-            logger.info(f"批量新增跳过（已存在）: {payload.code}")
+            logger.info(f"[batch_create] 跳过（已存在）: {payload.code}")
             continue
 
         resolved = resolve_code(payload.code)
         if not resolved:
-            logger.warning(f"批量新增跳过（无法识别）: {payload.code}")
+            logger.warning(f"[batch_create] 跳过（无法识别代码）: {payload.code}")
             continue
 
-        target = Target(
-            code=resolved["code"],
-            name=resolved["name"],
-            type=TargetType(resolved["type"]),
-            buy_bias_rate=payload.buy_bias_rate,
-            sell_bias_rate=payload.sell_bias_rate,
-            buy_growth_rate=payload.buy_growth_rate,
-            sell_growth_rate=payload.sell_growth_rate,
-            created_at=get_current_time(),
-        )
-        db.add(target)
-        results.append(target)
+        try:
+            target = Target(
+                code=resolved["code"],
+                name=resolved["name"],
+                type=TargetType(resolved["type"]),
+                buy_bias_rate=payload.buy_bias_rate,
+                sell_bias_rate=payload.sell_bias_rate,
+                buy_growth_rate=payload.buy_growth_rate,
+                sell_growth_rate=payload.sell_growth_rate,
+                created_at=get_current_time(),
+            )
+            db.add(target)
+            results.append(target)
+            logger.info(f"[batch_create] 新增成功: {resolved['name']}({resolved['code']}) 类型={resolved['type']}")
+        except Exception as e:
+            logger.error(f"[batch_create] 新增失败: {payload.code}, 原因: {e}", exc_info=True)
+            continue
 
     db.commit()
     for t in results:
         db.refresh(t)
 
-    logger.info(f"批量新增完成: 成功 {len(results)} 个")
+    logger.info(f"[batch_create] 批量新增完成: 成功 {len(results)}/{len(payloads)} 个")
     return results

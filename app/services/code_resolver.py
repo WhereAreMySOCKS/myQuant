@@ -18,11 +18,16 @@ MAX_RETRIES = 3
 def _safe_fetch(func: Callable, label: str) -> Optional[object]:
     """安全调用 akshare，带重试"""
     for attempt in range(1, MAX_RETRIES + 1):
+        t0 = time.time()
         try:
             result = func()
+            elapsed = time.time() - t0
+            rows = len(result) if result is not None and hasattr(result, '__len__') else 'N/A'
+            logger.debug(f"[_safe_fetch] {label} 第 {attempt} 次成功: {rows} 行, 耗时={elapsed:.2f}s")
             return result
         except Exception as e:
-            logger.warning(f"{label} 第 {attempt}/{MAX_RETRIES} 次失败: {e}")
+            elapsed = time.time() - t0
+            logger.warning(f"[_safe_fetch] {label} 第 {attempt}/{MAX_RETRIES} 次失败 (耗时={elapsed:.2f}s): {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(REQUEST_INTERVAL * 2)
     return None
@@ -179,14 +184,17 @@ def _fetch_and_save(
     通用的拉取+入库逻辑
     自动尝试多个数据源，自动检测列名，去重后入库
     """
+    t0 = time.time()
     df = _try_with_fallbacks(sources)
     if df is None or df.empty:
-        logger.error(f"{type_str} 全量表拉取失败（所有数据源均不可用）")
+        logger.error(f"[_fetch_and_save] {type_str} 全量表拉取失败（所有数据源均不可用）, 耗时={time.time()-t0:.2f}s")
         return 0
+
+    logger.debug(f"[_fetch_and_save] {type_str} 拉取完成: {len(df)} 行, 列={list(df.columns)}, 耗时={time.time()-t0:.2f}s")
 
     cols = _detect_columns(df, col_candidates)
     if cols is None:
-        logger.error(f"{type_str} 列名无法识别，实际列: {list(df.columns)}")
+        logger.error(f"[_fetch_and_save] {type_str} 列名无法识别，实际列: {list(df.columns)}")
         return 0
 
     code_col, name_col = cols
@@ -201,9 +209,11 @@ def _fetch_and_save(
         records.append(SecurityInfo(code=code, name=name, type=type_str))
         existing_codes.add(code)  # 防止同一批次内重复
 
+    t1 = time.time()
     if records:
         db.bulk_save_objects(records)
         db.commit()
+    logger.debug(f"[_fetch_and_save] {type_str} 入库完成: {len(records)} 条, 总耗时={time.time()-t0:.2f}s")
 
     return len(records)
 
@@ -243,24 +253,29 @@ def _fetch_single_from_remote(code: str, db: Session) -> Optional[dict]:
     ]
 
     for sources, col_candidates, type_str in search_plan:
+        logger.debug(f"[_fetch_single_from_remote] {code} 尝试数据源: {type_str}")
         df = _try_with_fallbacks(sources)
         if df is None or df.empty:
+            logger.debug(f"[_fetch_single_from_remote] {code} {type_str} 数据源返回为空，跳过")
             continue
 
         cols = _detect_columns(df, col_candidates)
         if cols is None:
+            logger.debug(f"[_fetch_single_from_remote] {code} {type_str} 列名无法识别，跳过")
             continue
 
         code_col, name_col = cols
         row = df[df[code_col].astype(str) == code]
         if not row.empty:
             name = str(row.iloc[0][name_col]).strip()
+            logger.info(f"[_fetch_single_from_remote] {code} 在 {type_str} 数据源中找到: 名称={name}")
             _save_to_cache(db, code, name, type_str)
             return {"code": code, "name": name, "type": type_str}
 
+        logger.debug(f"[_fetch_single_from_remote] {code} 在 {type_str} 数据源({len(df)} 行)中未找到")
         time.sleep(REQUEST_INTERVAL)
 
-    logger.error(f"所有数据源均无法识别代码: {code}")
+    logger.error(f"[_fetch_single_from_remote] 所有数据源均无法识别代码: {code}")
     return None
 
 

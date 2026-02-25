@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 import logging
 import requests
 from typing import Optional, Dict, Set
@@ -143,15 +144,20 @@ async def monitor_loop():
             await asyncio.sleep(60)
             continue
 
-        logger.info("执行一轮扫描...")
+        scan_start = time.time()
         targets = await asyncio.to_thread(_load_targets_from_db)
+        total = len(targets)
+        logger.info(f"[monitor] 开始新一轮扫描，共 {total} 个标的")
 
         if not targets:
-            logger.info("暂无关注标的，等待下一轮...")
+            logger.info("[monitor] 暂无关注标的，等待下一轮...")
             await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
             continue
 
         alerts = []
+        processed = 0
+        skipped = 0
+        errors = 0
 
         for t in targets:
             code = t["code"]
@@ -165,21 +171,31 @@ async def monitor_loop():
                     else:
                         rt = await asyncio.to_thread(fetch_etf_realtime, code)
                     if not rt:
+                        logger.warning(f"[monitor] {name}({code}) 实时数据获取失败，跳过")
+                        skipped += 1
                         continue
 
                     price = rt["price"]
                     hist_df = await asyncio.to_thread(_get_history, code, t_type)
                     if hist_df is None:
+                        logger.warning(f"[monitor] {name}({code}) 历史K线获取失败，跳过")
+                        skipped += 1
                         continue
 
-                    indicators = compute_indicators(hist_df, price)
+                    indicators = compute_indicators(hist_df, price, code=code)
                     if not indicators:
+                        logger.warning(f"[monitor] {name}({code}) 指标计算失败（数据不足），跳过")
+                        skipped += 1
                         continue
 
                     signal = check_signal(
                         indicators,
                         buy_bias_rate=t["buy_bias_rate"],
                         sell_bias_rate=t["sell_bias_rate"],
+                    )
+                    logger.debug(
+                        f"[monitor] {name}({code}) 价格={price}, MA250={indicators['ma250']}, "
+                        f"乖离率={indicators['bias_percent']}, 信号={signal}"
                     )
 
                     if signal and not _is_alerted(code, signal):
@@ -196,10 +212,13 @@ async def monitor_loop():
                         )
                         alerts.append(msg)
                         _mark_alerted(code, signal)
+                        logger.info(f"[monitor] {name}({code}) 触发{signal}信号: 价格={price}, 乖离率={indicators['bias_percent']}")
 
                 elif t_type == "otc":
                     est = await asyncio.to_thread(fetch_otc_estimation, code)
                     if not est:
+                        logger.warning(f"[monitor] {name}({code}) 场外估值获取失败，跳过")
+                        skipped += 1
                         continue
 
                     otc_indicators = {"growth_rate": est["growth_rate"]}
@@ -207,6 +226,10 @@ async def monitor_loop():
                         otc_indicators,
                         buy_growth_rate=t["buy_growth_rate"],
                         sell_growth_rate=t["sell_growth_rate"],
+                    )
+                    logger.debug(
+                        f"[monitor] {name}({code}) 场外估算净值={est['nav']}, "
+                        f"估算增长率={est['growth_rate']}%, 信号={signal}"
                     )
 
                     if signal and not _is_alerted(code, signal):
@@ -224,14 +247,26 @@ async def monitor_loop():
                         )
                         alerts.append(msg)
                         _mark_alerted(code, signal)
+                        logger.info(f"[monitor] {name}({code}) 场外触发{signal}信号: 估算增长率={est['growth_rate']}%")
+
+                processed += 1
 
             except Exception as e:
-                logger.error("监控 {}({}) 出错: {}".format(name, code, e))
+                errors += 1
+                logger.error(f"[monitor] {name}({code}) 处理出错: {e}", exc_info=True)
+
+        scan_elapsed = time.time() - scan_start
+        logger.info(
+            f"[monitor] 本轮扫描完成: 总耗时={scan_elapsed:.2f}s, "
+            f"处理={processed}, 跳过={skipped}, 出错={errors}, 触发信号={len(alerts)}"
+        )
 
         if alerts:
+            subject = "【交易信号】发现 {} 个信号".format(len(alerts))
+            logger.info(f"[monitor] 发送报警邮件: {subject}, 信号摘要={[a.splitlines()[0] for a in alerts]}")
             await asyncio.to_thread(
                 send_email,
-                "【交易信号】发现 {} 个信号".format(len(alerts)),
+                subject,
                 "\n" + ("-" * 30 + "\n").join(alerts),
             )
 
