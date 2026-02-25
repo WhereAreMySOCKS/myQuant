@@ -1,8 +1,11 @@
 import asyncio
+import random
 import threading
 import time
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import Optional, Dict, Set
 
 from fastapi import FastAPI
@@ -14,7 +17,7 @@ from app.utils import is_trading_time, get_current_time
 from app.services.data_fetcher import (
     fetch_stock_realtime, fetch_stock_history,
     fetch_etf_realtime, fetch_etf_history,
-    fetch_otc_estimation,
+    fetch_otc_estimation, safe_float,
 )
 from app.services.analyzer import compute_indicators, check_signal
 from app.services.notifier import send_email
@@ -22,38 +25,46 @@ from app.services.code_resolver import init_security_info
 from app.routes import target as target_router
 from app.routes import quote as quote_router
 
-# ========== 全局注入浏览器 Headers，解决东方财富反爬 ==========
-_BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://quote.eastmoney.com/",
+# ========== 全局注入浏览器 Headers，随机 UA 轮换 ==========
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15",
+]
+
+_BASE_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 }
 
+_RETRY_STRATEGY = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[500, 502, 503, 504],
+    allowed_methods=["GET", "POST"],
+)
+
 
 def _patch_requests_headers():
     """
-    Monkey-patch requests.Session 的默认 headers
-    akshare 内部所有 requests.get/post 都会自动带上浏览器 headers
+    Monkey-patch requests.Session：随机 User-Agent + urllib3 自动重试
     """
     _original_init = requests.Session.__init__
 
     def _patched_init(self, *args, **kwargs):
         _original_init(self, *args, **kwargs)
-        self.headers.update(_BROWSER_HEADERS)
+        headers = dict(_BASE_HEADERS)
+        headers["User-Agent"] = random.choice(_USER_AGENTS)
+        self.headers.update(headers)
+        adapter = HTTPAdapter(max_retries=_RETRY_STRATEGY)
+        self.mount("http://", adapter)
+        self.mount("https://", adapter)
 
     requests.Session.__init__ = _patched_init
-
-    # 同时 patch 模块级别的默认 headers（requests.get 内部也会创建 Session）
-    requests.utils.default_headers = lambda: requests.structures.CaseInsensitiveDict(
-        _BROWSER_HEADERS
-    )
 
 
 # 启动时立即执行 patch
@@ -112,7 +123,8 @@ def _get_history(code, t_type):
         hist = fetch_etf_history(code)
 
     with HIST_CACHE_LOCK:
-        HIST_CACHE[code] = hist
+        if hist is not None:  # 只缓存成功结果
+            HIST_CACHE[code] = hist
 
     return hist
 
