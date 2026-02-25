@@ -1,6 +1,171 @@
-# Investment Guard V3 — API 接口文档
+# Investment Guard V3 — A股投资监控系统
 
-> A股投资监控系统：个股 / ETF / 场外基金 实时监控 + 买卖信号报警
+> 个股 / ETF / 场外基金 实时监控 + 买卖信号邮件报警
+>
+> 基于 FastAPI + SQLite，部署在 Docker 容器中 7×24 运行
+
+## 功能特性
+
+- 支持 A 股个股、场内 ETF、场外基金三种标的类型
+- 交易时间自动轮询行情，非交易时间自动休眠
+- 个股/ETF 基于 MA250（年线）乖离率判断买卖信号
+- 场外基金基于实时估算涨跌幅判断买卖信号
+- 信号触发后通过 QQ 邮箱发送报警邮件
+- 同一标的同一天同方向只报警一次（防刷屏）
+- RESTful API 管理关注标的和查询行情
+- 自动识别证券代码的名称和类型（只需传代码）
+- 交易时间判断包含中国法定节假日和调休处理
+
+## 系统架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  FastAPI Application                 │
+├──────────┬──────────┬───────────────────────────────┤
+│ Routes   │ Services │ Core                          │
+│          │          │                               │
+│ target   │ data     │ monitor_loop (后台监控循环)    │
+│  (CRUD)  │ fetcher  │  ├─ 拉取实时行情              │
+│          │ (腾讯/   │  ├─ 计算 MA250 乖离率         │
+│ quote    │  天天)   │  ├─ 判断买卖信号              │
+│  (查询)  │          │  └─ 发送邮件报警              │
+│          │ analyzer │                               │
+│          │ notifier │                               │
+│          │ resolver │                               │
+├──────────┴──────────┴───────────────────────────────┤
+│           SQLite (targets + security_info)           │
+└─────────────────────────────────────────────────────┘
+```
+
+## 项目结构
+
+```
+myQuant/
+├── app/
+│   ├── config.py              # 配置管理（从 .env 读取邮箱、轮询间隔等）
+│   ├── database.py            # SQLAlchemy ORM + SQLite（targets 表 + security_info 缓存表）
+│   ├── models.py              # Pydantic 数据模型（API 请求/响应格式定义）
+│   ├── utils.py               # 工具函数（A股交易时间判断，含法定节假日处理）
+│   ├── main.py                # FastAPI 入口 + 后台监控循环 + 报警去重 + K线缓存
+│   ├── routes/
+│   │   ├── target.py          # 关注标的 CRUD API（增删改查 + 批量添加）
+│   │   └── quote.py           # 行情查询 API（实时行情/估值/收盘价）
+│   └── services/
+│       ├── data_fetcher.py    # 行情数据获取（腾讯财经 + 天天基金，不依赖东方财富）
+│       ├── analyzer.py        # 技术指标计算（MA5/MA20/MA250/乖离率）+ 买卖信号判断
+│       ├── notifier.py        # QQ 邮箱 SMTP 报警通知（带重试 + 脱敏日志）
+│       └── code_resolver.py   # 证券代码自动识别（本地缓存优先，接口兜底）
+├── Dockerfile                 # Docker 构建（Python 3.11-slim + 上海时区）
+├── docker-compose.yml         # Docker 编排（端口映射 + 数据持久化）
+├── requirements.txt           # Python 依赖
+├── .env                       # 环境变量（邮箱配置，不提交到 Git）
+└── data/                      # SQLite 数据库文件目录
+```
+
+## 数据源说明
+
+| 数据类型 | 数据源 | 接口地址 | 特点 |
+|---------|--------|---------|------|
+| 个股/ETF 实时行情 | 腾讯财经 | `qt.gtimg.cn` | 单只查询，极快，不拉全量表 |
+| 个股/ETF 历史K线 | 腾讯财经(主) + 新浪(备) | `web.ifzq.gtimg.cn` | 支持前复权，双数据源降级 |
+| 场外基金实时估值 | 天天基金 | `fundgz.1234567.com.cn` | 覆盖所有场外基金代码 |
+| 场外基金历史净值 | 天天基金 | `api.fund.eastmoney.com` | 非行情服务器，不受 IP 封禁影响 |
+| 证券代码识别(启动时) | 东方财富(via akshare) | — | 仅首次启动拉取一次，缓存到本地数据库 |
+
+## 信号策略说明
+
+**个股/ETF — 乖离率策略**
+
+乖离率 = (当前价 - MA250) / MA250
+
+- 乖离率 ≤ 买入阈值（如 -0.08）→ 🟢 BUY 信号（股价远低于年线，可能低估）
+- 乖离率 ≥ 卖出阈值（如 0.15）→ 🔴 SELL 信号（股价远高于年线，可能高估）
+- 卖出优先判断（保守策略，优先止盈/止损）
+
+**场外基金 — 估算涨跌幅策略**
+
+- 估算跌幅 ≤ 买入阈值（如 -2.0%）→ 🟢 BUY
+- 估算涨幅 ≥ 卖出阈值（如 3.0%）→ 🔴 SELL
+
+## 快速开始（部署指南）
+
+### 前置条件
+
+- Docker + Docker Compose
+- QQ 邮箱 + SMTP 授权码
+
+### 配置 .env
+
+```env
+SENDER_EMAIL=your_qq@qq.com
+EMAIL_PASSWORD=your_smtp_auth_code
+RECEIVER_EMAIL=your_receive@qq.com
+POLL_INTERVAL_SECONDS=15
+```
+
+### 启动服务
+
+```bash
+git clone https://github.com/WhereAreMySOCKS/myQuant.git
+cd myQuant
+# 编辑 .env 填入你的邮箱配置
+docker-compose up -d --build
+```
+
+### 添加关注标的
+
+```bash
+# 添加个股
+curl -X POST http://localhost:8000/targets/ \
+  -H "Content-Type: application/json" \
+  -d '{"code":"600519","buy_bias_rate":-0.08,"sell_bias_rate":0.15}'
+
+# 添加 ETF
+curl -X POST http://localhost:8000/targets/ \
+  -H "Content-Type: application/json" \
+  -d '{"code":"510300","buy_bias_rate":-0.05,"sell_bias_rate":0.10}'
+
+# 添加场外基金
+curl -X POST http://localhost:8000/targets/ \
+  -H "Content-Type: application/json" \
+  -d '{"code":"012708","buy_growth_rate":-2.0,"sell_growth_rate":3.0}'
+```
+
+### 查看状态
+
+```bash
+# 系统状态
+curl http://localhost:8000/
+
+# 查看所有关注
+curl http://localhost:8000/targets/
+
+# 查询行情
+curl http://localhost:8000/quote/600519
+
+# 查看日志
+docker logs -f investment_guard --tail 50
+```
+
+## 常见问题（FAQ）
+
+**Q: 轮询间隔设多少合适？**
+A: 标的少（<10个）可以 5-10 秒，多的话建议 15-30 秒，避免被数据源限流
+
+**Q: 场外基金估值不准怎么办？**
+A: 天天基金估值是基于持仓推算的，和实际净值可能有偏差，仅供参考
+
+**Q: 怎么获取 QQ 邮箱授权码？**
+A: QQ 邮箱 → 设置 → 账户 → POP3/SMTP 服务 → 开启 → 生成授权码
+
+**Q: 非交易时间查询返回的是什么数据？**
+A: 个股/ETF 返回最近一个交易日的收盘价，场外基金返回最近确认净值
+
+---
+
+# API 接口文档
+
+> 以下为完整的 REST API 接口说明
 
 - **Base URL**：`http://localhost:8000`
 - **数据格式**：JSON
