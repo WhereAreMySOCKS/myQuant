@@ -8,14 +8,15 @@ logger = logging.getLogger(__name__)
 MIN_HISTORY_ROWS = 250
 
 
-def compute_indicators(df: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
+def compute_indicators(df: pd.DataFrame, current_price: float, code: str = "") -> Optional[Dict[str, Any]]:
     """
     计算技术指标: MA5, MA20, MA250, 乖离率
     用实时价覆盖最后一行，盘中更准确
     """
+    label = f" ({code})" if code else ""
     if df is None or len(df) < MIN_HISTORY_ROWS:
         logger.warning(
-            f"历史数据不足: 当前 {len(df) if df is not None else 0} 行, "
+            f"历史数据不足{label}: 当前 {len(df) if df is not None else 0} 行, "
             f"需要至少 {MIN_HISTORY_ROWS} 行才能计算 MA250"
         )
         return None
@@ -28,7 +29,7 @@ def compute_indicators(df: pd.DataFrame, current_price: float) -> Optional[Dict[
     ma250 = close.rolling(250).mean().iloc[-1]
     bias_rate = (current_price - ma250) / ma250
 
-    return {
+    result = {
         "price": round(current_price, 3),
         "ma5": round(ma5, 3),
         "ma20": round(ma20, 3),
@@ -36,6 +37,11 @@ def compute_indicators(df: pd.DataFrame, current_price: float) -> Optional[Dict[
         "bias_rate": round(bias_rate, 4),
         "bias_percent": f"{bias_rate:.2%}",
     }
+    logger.debug(
+        f"[compute_indicators]{label} 价格={result['price']}, MA250={result['ma250']}, "
+        f"乖离率={result['bias_percent']}"
+    )
+    return result
 
 
 def check_signal(
