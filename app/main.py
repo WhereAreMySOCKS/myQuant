@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import logging
+import requests
 from typing import Optional, Dict, Set
 
 from fastapi import FastAPI
@@ -19,6 +20,43 @@ from app.services.notifier import send_email
 from app.services.code_resolver import init_security_info
 from app.routes import target as target_router
 from app.routes import quote as quote_router
+
+# ========== 全局注入浏览器 Headers，解决东方财富反爬 ==========
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://quote.eastmoney.com/",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+
+
+def _patch_requests_headers():
+    """
+    Monkey-patch requests.Session 的默认 headers
+    akshare 内部所有 requests.get/post 都会自动带上浏览器 headers
+    """
+    _original_init = requests.Session.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        self.headers.update(_BROWSER_HEADERS)
+
+    requests.Session.__init__ = _patched_init
+
+    # 同时 patch 模块级别的默认 headers（requests.get 内部也会创建 Session）
+    requests.utils.default_headers = lambda: requests.structures.CaseInsensitiveDict(
+        _BROWSER_HEADERS
+    )
+
+
+# 启动时立即执行 patch
+_patch_requests_headers()
 
 # 日志
 logging.basicConfig(
