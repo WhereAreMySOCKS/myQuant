@@ -52,7 +52,23 @@ def create_target(payload: TargetCreate, db: Session = Depends(get_db)):
 @router.get("/", response_model=List[TargetResponse], summary="获取所有关注标的")
 def list_targets(db: Session = Depends(get_db)):
     return db.query(Target).all()
+@router.delete("/all", summary="清空所有关注标的")
+def delete_all_targets(db: Session = Depends(get_db)):
+    """
+    一键删除数据库中所有的关注标的
+    """
+    try:
+        # 批量删除 Target 表中的所有记录
+        deleted_count = db.query(Target).delete()
+        db.commit()
 
+        logger.info(f"[target] 已清空所有关注标的，共删除 {deleted_count} 条记录")
+        return {"message": "已成功清空所有关注标的", "deleted_count": deleted_count}
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[target] 清空关注标的失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="清空关注标的失败，请查看日志")
 
 @router.get("/{code}", response_model=TargetResponse, summary="查询单个标的")
 def get_target(code: str, db: Session = Depends(get_db)):
@@ -88,23 +104,7 @@ def delete_target(code: str, db: Session = Depends(get_db)):
     return {"message": f"已删除 {code}"}
 
 
-@router.delete("/all", summary="清空所有关注标的")
-def delete_all_targets(db: Session = Depends(get_db)):
-    """
-    一键删除数据库中所有的关注标的
-    """
-    try:
-        # 批量删除 Target 表中的所有记录
-        deleted_count = db.query(Target).delete()
-        db.commit()
 
-        logger.info(f"[target] 已清空所有关注标的，共删除 {deleted_count} 条记录")
-        return {"message": "已成功清空所有关注标的", "deleted_count": deleted_count}
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"[target] 清空关注标的失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="清空关注标的失败，请查看日志")
 
 @router.post("/batch", response_model=List[TargetResponse], summary="批量新增关注")
 def batch_create_targets(
