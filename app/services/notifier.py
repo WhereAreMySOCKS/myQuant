@@ -4,6 +4,7 @@ from email.mime.text import MIMEText
 from email.header import Header
 from app.config import settings
 import logging
+from email.utils import formataddr
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,12 @@ def _mask_email(email: str) -> str:
 def send_email(subject: str, content: str):
     """通过 QQ 邮箱 SMTP 发送报警邮件（带重试）"""
     message = MIMEText(content, 'plain', 'utf-8')
-    message['From'] = Header("Investment Guard", 'utf-8')
-    message['To'] = Header("Investor", 'utf-8')
-    message['Subject'] = Header(subject, 'utf-8')
 
+    sender_name = str(Header("Investment Guard", 'utf-8'))
+    message['From'] = formataddr((sender_name, settings.SENDER_EMAIL))
+    receiver_name = str(Header("Investor", 'utf-8'))
+    message['To'] = formataddr((receiver_name, settings.RECEIVER_EMAIL))
+    message['Subject'] = Header(subject, 'utf-8')
     msg_bytes = len(message.as_bytes())
     receiver_masked = _mask_email(settings.RECEIVER_EMAIL)
     logger.info(f"[notifier] 准备发送邮件: 主题={subject!r}, 收件人={receiver_masked}, 大小={msg_bytes}B")
