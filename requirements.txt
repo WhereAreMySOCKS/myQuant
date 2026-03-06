@@ -6,3 +6,7 @@ pydantic-settings
 sqlalchemy
 chinese_calendar
 pytz
+alembic
+pytest
+pytest-asyncio
+httpx

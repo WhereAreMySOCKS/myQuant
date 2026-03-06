@@ -3,7 +3,7 @@ import time
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr, formatdate
-from app.config import settings
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)

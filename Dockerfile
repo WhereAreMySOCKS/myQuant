@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # 复制项目
 COPY ./app /code/app
+COPY ./alembic /code/alembic
+COPY ./alembic.ini /code/alembic.ini
 
 # 数据目录（SQLite）
 RUN mkdir -p /code/data

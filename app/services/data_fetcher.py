@@ -1,3 +1,4 @@
+import json
 import re
 import time
 import requests
@@ -298,7 +299,6 @@ def fetch_otc_estimation(code: str) -> dict | None:
         if not m:
             logger.warning(f"[otc_estimation] {code} 天天基金接口返回数据解析失败: {text[:80]}")
             return None
-        import json
         obj = json.loads(m.group(1))
         nav = safe_float(obj.get("gsz"))
         growth_rate = safe_float(obj.get("gszzl"))

@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 import logging
 
-from app.database import get_db, Target
-from app.utils import is_trading_time
+from app.core.deps import get_db
+from app.core.exceptions import NotFoundException, DataSourceException
+from app.models.target import Target
+from app.utils.time_utils import is_trading_time
 from app.services.data_fetcher import (
     fetch_stock_realtime, fetch_stock_history,
     fetch_etf_realtime, fetch_etf_history,
@@ -24,7 +26,7 @@ def get_quote(code: str, db: Session = Depends(get_db)):
     """
     target = db.query(Target).filter(Target.code == code).first()
     if not target:
-        raise HTTPException(404, f"标的 {code} 未关注，请先添加")
+        raise NotFoundException(f"标的 {code} 未关注，请先添加")
 
     t_type = target.type.value
     trading = is_trading_time()
@@ -113,4 +115,4 @@ def get_quote(code: str, db: Session = Depends(get_db)):
             }
 
     logger.error(f"[quote] {code} 所有数据源均不可用，返回 503")
-    raise HTTPException(503, "数据获取失败，上游接口暂不可用")
+    raise DataSourceException("数据获取失败，上游接口暂不可用")
