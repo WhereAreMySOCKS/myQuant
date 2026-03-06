@@ -78,13 +78,12 @@ def _history_start_date() -> str:
     """
     months = settings.HISTORY_LOOKBACK_MONTHS
     today = datetime.date.today()
-    # 往前推 months 个月（简单按 30 天/月近似，再 clamp 到月份边界）
-    year = today.year - months // 12
-    month = today.month - months % 12
-    if month <= 0:
-        month += 12
+    # 用绝对月数计算，避免月份借位溢出
+    total_months = today.year * 12 + today.month - months
+    year, month = divmod(total_months, 12)
+    if month == 0:
+        month = 12
         year -= 1
-    # 取该月 1 日作为起始
     start = datetime.date(year, month, 1)
     return start.strftime("%Y-%m-%d")
 
