@@ -1,463 +1,240 @@
-# Investment Guard V3 — A股投资监控系统
+# myQuant — A股量化监控系统
 
-> 个股 / ETF / 场外基金 实时监控 + 买卖信号邮件报警
+> 面向量化交易初学者的 A 股投资监控工具：个股 / ETF / 场外基金实时监控 + MA250 乖离率信号 + 邮件报警 + 回测引擎
 >
-> 基于 FastAPI + SQLite，部署在 Docker 容器中 7×24 运行
+> 基于 FastAPI + SQLite，支持 Docker 一键部署，7×24 后台运行
+
+---
+
+## 📖 目录
+
+- [功能特性](#功能特性)
+- [系统架构](#系统架构)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [API 文档](#api-文档)
+- [项目结构说明](#项目结构说明)
+- [技术栈](#技术栈)
+- [学习文档导航](#学习文档导航)
+- [运行测试](#运行测试)
+- [开发路线图](#开发路线图)
+
+---
 
 ## 功能特性
 
-- 支持 A 股个股、场内 ETF、场外基金三种标的类型
-- 交易时间自动轮询行情，非交易时间自动休眠
-- 个股/ETF 基于 MA250（年线）乖离率判断买卖信号
-- 场外基金基于实时估算涨跌幅判断买卖信号
-- 信号触发后通过 QQ 邮箱发送报警邮件
-- 同一标的同一天同方向只报警一次（防刷屏）
-- RESTful API 管理关注标的和查询行情
-- 自动识别证券代码的名称和类型（只需传代码）
-- 交易时间判断包含中国法定节假日和调休处理
+- 📈 **多类型标的支持**：A 股个股、场内 ETF、场外基金，自动识别代码类型和名称
+- ⏰ **智能轮询**：交易时间自动拉取实时行情，非交易时间自动休眠节省资源
+- 🎯 **均线信号**：个股/ETF 基于 MA250（年线）乖离率判断超买/超卖信号
+- 📩 **邮件报警**：信号触发后通过 SMTP 发送邮件，同标的同方向每天仅报警一次（防刷屏）
+- 🔁 **历史回测**：内置 MA250 乖离率策略回测引擎，支持自定义参数和日期区间
+- 🛠 **RESTful API**：完整的增删改查接口，配合 Swagger UI 交互式调试
+- 🗓 **节假日感知**：集成中国法定节假日和调休日历，交易时间判断更准确
+- 🔄 **主备数据源**：腾讯财经为主、新浪财经为备，自动切换确保数据可用性
+
+---
 
 ## 系统架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  FastAPI Application                 │
-├──────────┬──────────┬───────────────────────────────┤
-│ Routes   │ Services │ Core                          │
-│          │          │                               │
-│ target   │ data     │ monitor_loop (后台监控循环)    │
-│  (CRUD)  │ fetcher  │  ├─ 拉取实时行情              │
-│          │ (腾讯/   │  ├─ 计算 MA250 乖离率         │
-│ quote    │  天天)   │  ├─ 判断买卖信号              │
-│  (查询)  │          │  └─ 发送邮件报警              │
-│          │ analyzer │                               │
-│          │ notifier │                               │
-│          │ resolver │                               │
-├──────────┴──────────┴───────────────────────────────┤
-│           SQLite (targets + security_info)           │
-└─────────────────────────────────────────────────────┘
+外部数据源
+  腾讯财经 (实时/历史K线)
+  新浪财经 (历史K线备用)
+  天天基金 (场外估值/历史净值)
+       │
+       ▼
+┌──────────────────────────────────────────────────────┐
+│                  FastAPI 应用层                       │
+│                                                      │
+│  ┌─────────────┐   ┌──────────────────────────────┐  │
+│  │   REST API  │   │    后台监控循环 (asyncio)      │  │
+│  │             │   │                              │  │
+│  │ /targets    │   │  1. 拉取所有关注标的实时行情   │  │
+│  │ /quote      │   │  2. 计算 MA250 乖离率          │  │
+│  │ /backtest   │   │  3. 判断买卖信号               │  │
+│  └─────────────┘   │  4. 触发邮件报警（去重）        │  │
+│         │          └──────────────────────────────┘  │
+│         │                      │                     │
+│  ┌──────▼──────────────────────▼────────────────────┐│
+│  │            服务层 (Services)                      ││
+│  │  data_fetcher  analyzer  backtester  notifier     ││
+│  └───────────────────────┬───────────────────────────┘│
+└──────────────────────────┼───────────────────────────┘
+                           ▼
+                    SQLite 数据库
+                 (targets + security_info)
 ```
 
-## 项目结构
+**数据流说明：**
+1. 用户通过 API 添加关注标的（如 `600519` 贵州茅台）
+2. 系统在数据库中记录标的及其买卖阈值
+3. 后台监控循环每隔 N 秒拉取所有标的的实时行情
+4. `analyzer` 服务计算技术指标（MA250 及乖离率）
+5. 乖离率超出阈值时，`notifier` 发送邮件报警
+6. 用户也可以通过 `/backtest` 接口对历史数据进行策略回测
 
-```
-myQuant/
-├── app/
-│   ├── config.py              # 配置管理（从 .env 读取邮箱、轮询间隔等）
-│   ├── database.py            # SQLAlchemy ORM + SQLite（targets 表 + security_info 缓存表）
-│   ├── models.py              # Pydantic 数据模型（API 请求/响应格式定义）
-│   ├── utils.py               # 工具函数（A股交易时间判断，含法定节假日处理）
-│   ├── main.py                # FastAPI 入口 + 后台监控循环 + 报警去重 + K线缓存
-│   ├── routes/
-│   │   ├── target.py          # 关注标的 CRUD API（增删改查 + 批量添加）
-│   │   └── quote.py           # 行情查询 API（实时行情/估值/收盘价）
-│   └── services/
-│       ├── data_fetcher.py    # 行情数据获取（腾讯财经 + 天天基金，不依赖东方财富）
-│       ├── analyzer.py        # 技术指标计算（MA5/MA20/MA250/乖离率）+ 买卖信号判断
-│       ├── notifier.py        # QQ 邮箱 SMTP 报警通知（带重试 + 脱敏日志）
-│       └── code_resolver.py   # 证券代码自动识别（本地缓存优先，接口兜底）
-├── Dockerfile                 # Docker 构建（Python 3.11-slim + 上海时区）
-├── docker-compose.yml         # Docker 编排（端口映射 + 数据持久化）
-├── requirements.txt           # Python 依赖
-├── .env                       # 环境变量（邮箱配置，不提交到 Git）
-└── data/                      # SQLite 数据库文件目录
-```
+---
 
-## 数据源说明
+## 快速开始
 
-| 数据类型 | 数据源 | 接口地址 | 特点 |
-|---------|--------|---------|------|
-| 个股/ETF 实时行情 | 腾讯财经 | `qt.gtimg.cn` | 单只查询，极快，不拉全量表 |
-| 个股/ETF 历史K线 | 腾讯财经(主) + 新浪(备) | `web.ifzq.gtimg.cn` | 支持前复权，双数据源降级 |
-| 场外基金实时估值 | 天天基金 | `fundgz.1234567.com.cn` | 覆盖所有场外基金代码 |
-| 场外基金历史净值 | 天天基金 | `api.fund.eastmoney.com` | 非行情服务器，不受 IP 封禁影响 |
-| 证券代码识别(启动时) | 东方财富(via akshare) | — | 仅首次启动拉取一次，缓存到本地数据库 |
+### 方式一：Docker 部署（推荐）
 
-## 信号策略说明
-
-**个股/ETF — 乖离率策略**
-
-乖离率 = (当前价 - MA250) / MA250
-
-- 乖离率 ≤ 买入阈值（如 -0.08）→ 🟢 BUY 信号（股价远低于年线，可能低估）
-- 乖离率 ≥ 卖出阈值（如 0.15）→ 🔴 SELL 信号（股价远高于年线，可能高估）
-- 卖出优先判断（保守策略，优先止盈/止损）
-
-**场外基金 — 估算涨跌幅策略**
-
-- 估算跌幅 ≤ 买入阈值（如 -2.0%）→ 🟢 BUY
-- 估算涨幅 ≥ 卖出阈值（如 3.0%）→ 🔴 SELL
-
-## 快速开始（部署指南）
-
-### 前置条件
-
-- Docker + Docker Compose
-- QQ 邮箱 + SMTP 授权码
-
-### 配置 .env
-
-```env
-SENDER_EMAIL=your_qq@qq.com
-EMAIL_PASSWORD=your_smtp_auth_code
-RECEIVER_EMAIL=your_receive@qq.com
-POLL_INTERVAL_SECONDS=15
-```
-
-### 启动服务
+**前置条件**：已安装 Docker 和 Docker Compose
 
 ```bash
+# 1. 克隆仓库
 git clone https://github.com/WhereAreMySOCKS/myQuant.git
 cd myQuant
-# 编辑 .env 填入你的邮箱配置
+
+# 2. 复制配置模板，填入真实邮箱信息
+cp .env.example .env
+# 用编辑器打开 .env，修改 SMTP 配置（详见下方配置说明）
+nano .env
+
+# 3. 启动服务
 docker-compose up -d --build
+
+# 4. 确认服务运行正常
+curl http://localhost:8000/
+# 应返回：{"status":"ok","message":"myQuant is running"}
 ```
 
-### 添加关注标的
+**查看运行日志：**
 
 ```bash
-# 添加个股
+docker logs -f investment_guard --tail 50
+```
+
+### 方式二：本地开发运行
+
+**前置条件**：Python 3.11+
+
+```bash
+# 1. 克隆并安装依赖
+git clone https://github.com/WhereAreMySOCKS/myQuant.git
+cd myQuant
+pip install -r requirements.txt
+
+# 2. 复制并配置环境变量
+cp .env.example .env
+# 编辑 .env 填入你的配置
+
+# 3. 初始化数据库
+mkdir -p data
+python -c "from app.core.database import init_db; init_db()"
+
+# 4. 启动开发服务器（带热重载）
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 5. 打开 Swagger 交互式 API 文档
+# 浏览器访问：http://localhost:8000/docs
+```
+
+### 添加第一个关注标的
+
+```bash
+# 添加贵州茅台（个股），乖离率 -8% 买入，+15% 卖出
 curl -X POST http://localhost:8000/targets/ \
   -H "Content-Type: application/json" \
   -d '{"code":"600519","buy_bias_rate":-0.08,"sell_bias_rate":0.15}'
 
-# 添加 ETF
+# 添加沪深300 ETF
 curl -X POST http://localhost:8000/targets/ \
   -H "Content-Type: application/json" \
   -d '{"code":"510300","buy_bias_rate":-0.05,"sell_bias_rate":0.10}'
 
-# 添加场外基金
-curl -X POST http://localhost:8000/targets/ \
-  -H "Content-Type: application/json" \
-  -d '{"code":"012708","buy_growth_rate":-2.0,"sell_growth_rate":3.0}'
-```
-
-### 查看状态
-
-```bash
-# 系统状态
-curl http://localhost:8000/
-
-# 查看所有关注
-curl http://localhost:8000/targets/
-
-# 查询行情
+# 查询行情和技术指标
 curl http://localhost:8000/quote/600519
-
-# 查看日志
-docker logs -f investment_guard --tail 50
 ```
-
-## 常见问题（FAQ）
-
-**Q: 轮询间隔设多少合适？**
-A: 标的少（<10个）可以 5-10 秒，多的话建议 15-30 秒，避免被数据源限流
-
-**Q: 场外基金估值不准怎么办？**
-A: 天天基金估值是基于持仓推算的，和实际净值可能有偏差，仅供参考
-
-**Q: 怎么获取 QQ 邮箱授权码？**
-A: QQ 邮箱 → 设置 → 账户 → POP3/SMTP 服务 → 开启 → 生成授权码
-
-**Q: 非交易时间查询返回的是什么数据？**
-A: 个股/ETF 返回最近一个交易日的收盘价，场外基金返回最近确认净值
 
 ---
 
-# API 接口文档
+## 配置说明
 
-> 以下为完整的 REST API 接口说明
+复制 `.env.example` 为 `.env` 并填入真实值。**不要将 `.env` 提交到 Git！**
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `APP_ENV` | `dev` | 运行环境：`dev`（开发）/ `test`（测试）/ `prod`（生产） |
+| `APP_NAME` | `myQuant` | 应用名称，用于日志标识 |
+| `APP_VERSION` | `3.0.0` | 应用版本号 |
+| `LOG_LEVEL` | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `LOG_FORMAT` | `text` | 日志格式：`text`（开发可读）/ `json`（生产机器解析） |
+| `SMTP_SERVER` | `smtp.qq.com` | SMTP 服务器地址 |
+| `SMTP_PORT` | `465` | SMTP 端口（465 为 SSL，587 为 TLS） |
+| `SENDER_EMAIL` | — | 发件人邮箱（如 `your_qq@qq.com`） |
+| `EMAIL_PASSWORD` | — | SMTP 授权码（**不是邮箱登录密码！**） |
+| `RECEIVER_EMAIL` | — | 接收报警邮件的邮箱 |
+| `POLL_INTERVAL_SECONDS` | `30` | 监控轮询间隔（秒）。标的少可设 5~10，多则 15~30 |
+| `MONITOR_CONCURRENCY` | `5` | 并发处理标的数，防止请求数据源过于频繁 |
+| `HISTORY_LOOKBACK_MONTHS` | `18` | 历史 K 线回溯月数，需覆盖至少 250 个交易日（≈12~14 个月） |
+| `DATABASE_URL` | `sqlite:///./data/investment_guard.db` | 数据库连接字符串 |
+
+**如何获取 QQ 邮箱 SMTP 授权码：**
+> QQ 邮箱 → 设置 → 账户 → 找到「POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV服务」→ 开启 SMTP 服务 → 按提示验证手机号 → 生成授权码
+
+---
+
+## API 文档
 
 - **Base URL**：`http://localhost:8000`
-- **数据格式**：JSON
-- **字符编码**：UTF-8
+- **交互式文档**：`http://localhost:8000/docs`（Swagger UI）
+- **数据格式**：JSON，UTF-8 编码
 
----
+### GET / — 系统状态
 
-## 目录
-
-- [1. 系统状态](#1-系统状态)
-  - [1.1 健康检查](#11-健康检查)
-- [2. 关注管理](#2-关注管理)
-  - [2.1 新增关注标的](#21-新增关注标的)
-  - [2.2 批量新增关注](#22-批量新增关注)
-  - [2.3 获取所有关注标的](#23-获取所有关注标的)
-  - [2.4 查询单个标的](#24-查询单个标的)
-  - [2.5 修改标的阈值](#25-修改标的阈值)
-  - [2.6 删除关注标的](#26-删除关注标的)
-  - [2.7 删除全部关注标的](#27-删除关注标的)
-
-- [3. 行情查询](#3-行情查询)
-  - [3.1 查询实时行情 / 估值](#31-查询实时行情--估值)
-- [附录 A：数据模型](#附录-a数据模型)
-- [附录 B：枚举值](#附录-b枚举值)
-- [附录 C：错误码](#附录-c错误码)
-
----
-
-## 1. 系统状态
-
-### 1.1 健康检查
-
-获取系统运行状态、当前是否为交易时间、已关注标的数量。
-
-```
-GET /
+```bash
+curl http://localhost:8000/
 ```
 
-#### 请求参数
-
-无
-
-#### 响应示例
-
+**响应示例：**
 ```json
 {
-  "status": "active",
-  "trading_time": true,
-  "monitored_count": 5
-}
-```
-
-#### 响应字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `status` | string | 系统状态，固定值 `"active"` |
-| `trading_time` | boolean | 当前是否为 A 股交易时间（工作日 09:30–11:30, 13:00–15:00） |
-| `monitored_count` | integer | 当前已关注的标的总数 |
-
----
-
-## 2. 关注管理
-
-> 路由前缀：`/targets`
-
-### 2.1 新增关注标的
-
-添加一个需要监控的个股、ETF 或场外基金。
-
-```
-POST /targets/
-```
-
-#### 请求头
-
-| Header | 值 |
-|--------|----|
-| Content-Type | application/json |
-
-#### 请求体
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `code` | string | ✅ | 标的代码，如 `"600519"`、`"510300"`、`"012708"` |
-| `buy_bias_rate` | float | ❌ | 个股/ETF 乖离率买入阈值，如 `-0.08` 表示低于年线 8% 时触发���入信号 |
-| `sell_bias_rate` | float | ❌ | 个股/ETF 乖离率卖出阈值，如 `0.15` 表示高于年线 15% 时触发卖出信号 |
-| `buy_growth_rate` | float | ❌ | 场外基金估算跌幅买入阈值，如 `-2.0` 表示估算跌 2% 时触发 |
-| `sell_growth_rate` | float | ❌ | 场外基金估算涨幅卖出阈值，如 `3.0` 表示估算涨 3% 时触发 |
-
-> **阈值说明**：
-> - `stock` / `etf` 类型应设置 `buy_bias_rate` 和 `sell_bias_rate`
-> - `otc` 类型应设置 `buy_growth_rate` 和 `sell_growth_rate`
-> - 未设置阈值的标的不会触发对应方向的信号
-
-#### 请求示例
-
-**个股：**
-
-```json
-{
-  "code": "600519",
-  "buy_bias_rate": -0.08,
-  "sell_bias_rate": 0.15
-}
-```
-
-**ETF：**
-
-```json
-{
-  "code": "510300",
-  "buy_bias_rate": -0.05,
-  "sell_bias_rate": 0.10
-}
-```
-
-**场外基金：**
-
-```json
-{
-  "code": "012708",
-  "buy_growth_rate": -2.0,
-  "sell_growth_rate": 3.0
-}
-```
-
-#### 成功响应 `200 OK`
-
-```json
-{
-  "id": 1,
-  "code": "600519",
-  "name": "贵州茅台",
-  "type": "stock",
-  "buy_bias_rate": -0.08,
-  "sell_bias_rate": 0.15,
-  "buy_growth_rate": null,
-  "sell_growth_rate": null
-}
-```
-
-#### 错误响应 `400 Bad Request`
-
-```json
-{
-  "detail": "标的 600519 已存在"
+  "status": "ok",
+  "message": "myQuant is running"
 }
 ```
 
 ---
 
-### 2.2 批量新增关注
+### POST /targets/ — 新增关注标的
 
-一次性添加多个标的，已存在的会自动跳过（不报错）。
+系统会自动识别证券代码的名称和类型（个股/ETF/场外基金），只需传入代码和阈值。
 
-```
-POST /targets/batch
-```
-
-#### 请求体
-
-类型：`TargetCreate[]`（数组），每个元素的字段与 [2.1 新增关注标的](#21-新增关注标的) 相同。
-
-#### 请求示例
-
-```json
-[
-  {
+**个股示例（乖离率策略）：**
+```bash
+curl -X POST http://localhost:8000/targets/ \
+  -H "Content-Type: application/json" \
+  -d '{
     "code": "600519",
-    "name": "贵州茅台",
-    "type": "stock",
     "buy_bias_rate": -0.08,
     "sell_bias_rate": 0.15
-  },
-  {
+  }'
+```
+
+**ETF 示例：**
+```bash
+curl -X POST http://localhost:8000/targets/ \
+  -H "Content-Type: application/json" \
+  -d '{
     "code": "510300",
-    "name": "沪深300ETF",
-    "type": "etf",
     "buy_bias_rate": -0.05,
     "sell_bias_rate": 0.10
-  },
-  {
+  }'
+```
+
+**场外基金示例（涨跌幅策略）：**
+```bash
+curl -X POST http://localhost:8000/targets/ \
+  -H "Content-Type: application/json" \
+  -d '{
     "code": "012708",
-    "name": "东方红启恒",
-    "type": "otc",
     "buy_growth_rate": -2.0,
     "sell_growth_rate": 3.0
-  }
-]
+  }'
 ```
 
-#### 成功响应 `200 OK`
-
-返回**实际新增成功**的标的列表（已存在的不包含在内）：
-
-```json
-[
-  {
-    "id": 1,
-    "code": "600519",
-    "name": "贵州茅台",
-    "type": "stock",
-    "buy_bias_rate": -0.08,
-    "sell_bias_rate": 0.15,
-    "buy_growth_rate": null,
-    "sell_growth_rate": null
-  },
-  {
-    "id": 2,
-    "code": "510300",
-    "name": "沪深300ETF",
-    "type": "etf",
-    "buy_bias_rate": -0.05,
-    "sell_bias_rate": 0.10,
-    "buy_growth_rate": null,
-    "sell_growth_rate": null
-  },
-  {
-    "id": 3,
-    "code": "012708",
-    "name": "东方红启恒",
-    "type": "otc",
-    "buy_bias_rate": null,
-    "sell_bias_rate": null,
-    "buy_growth_rate": -2.0,
-    "sell_growth_rate": 3.0
-  }
-]
-```
-
----
-
-### 2.3 获取所有关注标的
-
-查询当前所有已关注的标的列表。
-
-```
-GET /targets/
-```
-
-#### 请求参数
-
-无
-
-#### 成功响应 `200 OK`
-
-```json
-[
-  {
-    "id": 1,
-    "code": "600519",
-    "name": "贵州茅台",
-    "type": "stock",
-    "buy_bias_rate": -0.08,
-    "sell_bias_rate": 0.15,
-    "buy_growth_rate": null,
-    "sell_growth_rate": null
-  },
-  {
-    "id": 2,
-    "code": "012708",
-    "name": "东方红启恒",
-    "type": "otc",
-    "buy_bias_rate": null,
-    "sell_bias_rate": null,
-    "buy_growth_rate": -2.0,
-    "sell_growth_rate": 3.0
-  }
-]
-```
-
-> 如果没有任何关注标的，返回空数组 `[]`。
-
----
-
-### 2.4 查询单个标的
-
-根据标的代码查询详情。
-
-```
-GET /targets/{code}
-```
-
-#### 路径参数
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `code` | string | 标的代码，如 `600519` |
-
-#### 成功响应 `200 OK`
-
+**响应示例：**
 ```json
 {
   "id": 1,
@@ -467,174 +244,81 @@ GET /targets/{code}
   "buy_bias_rate": -0.08,
   "sell_bias_rate": 0.15,
   "buy_growth_rate": null,
-  "sell_growth_rate": null
-}
-```
-
-#### 错误响应 `404 Not Found`
-
-```json
-{
-  "detail": "标的 600519 不存在"
+  "sell_growth_rate": null,
+  "created_at": "2024-01-15T10:30:00"
 }
 ```
 
 ---
 
-### 2.5 修改标的阈值
+### GET /targets/ — 获取所有关注标的
 
-修改已关注标的的名称或买卖阈值，仅传需要修改的字段即可。
-
-```
-PUT /targets/{code}
+```bash
+curl http://localhost:8000/targets/
 ```
 
-#### 路径参数
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `code` | string | 标的代码 |
-
-#### 请求体（部分更新）
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `name` | string | ❌ | 新名称 |
-| `buy_bias_rate` | float | ❌ | 新的乖离率买入阈值 |
-| `sell_bias_rate` | float | ❌ | 新的乖离率卖出阈值 |
-| `buy_growth_rate` | float | ❌ | 新的估算跌幅买入阈值 |
-| `sell_growth_rate` | float | ❌ | 新的估算涨幅卖出阈值 |
-
-> 仅传入需要修改的字段，未传入的字段保持不变。
-
-#### 请求示例
-
-将买入乖离率阈值从 `-0.08` 改为 `-0.10`：
-
+**响应示例：**
 ```json
-{
-  "buy_bias_rate": -0.10
-}
-```
-
-#### 成功响应 `200 OK`
-
-返回修改后的完整标的信息：
-
-```json
-{
-  "id": 1,
-  "code": "600519",
-  "name": "贵州茅台",
-  "type": "stock",
-  "buy_bias_rate": -0.10,
-  "sell_bias_rate": 0.15,
-  "buy_growth_rate": null,
-  "sell_growth_rate": null
-}
-```
-
-#### 错误响应 `404 Not Found`
-
-```json
-{
-  "detail": "标的 600519 不存在"
-}
+[
+  {
+    "id": 1,
+    "code": "600519",
+    "name": "贵州茅台",
+    "type": "stock",
+    "buy_bias_rate": -0.08,
+    "sell_bias_rate": 0.15,
+    "buy_growth_rate": null,
+    "sell_growth_rate": null,
+    "created_at": "2024-01-15T10:30:00"
+  }
+]
 ```
 
 ---
 
-### 2.6 删除关注标的
+### GET /targets/{code} — 查询单个标的详情
 
-取消关注某个标的，删除后将不再监控。
-
-```
-DELETE /targets/{code}
-```
-
-#### 路径参数
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `code` | string | 标的代码 |
-
-#### 成功响应 `200 OK`
-
-```json
-{
-  "message": "已删除 600519"
-}
-```
-
-#### 错误响应 `404 Not Found`
-
-```json
-{
-  "detail": "标的 600519 不存在"
-}
+```bash
+curl http://localhost:8000/targets/600519
 ```
 
 ---
 
+### PUT /targets/{code} — 更新标的阈值
 
-### 2.6 删除全部关注标的
-
-取消关注某个标的，删除后将不再监控。
-
-```
-DELETE /targets/all
-```
-
-#### 成功响应 `200 OK`
-
-```json
-{
-  "message": "已删除 600519"
-}
-```
-
-#### 错误响应 `404 Not Found`
-
-```json
-{
-  "detail": "标的 600519 不存在"
-}
+```bash
+curl -X PUT http://localhost:8000/targets/600519 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "buy_bias_rate": -0.10,
+    "sell_bias_rate": 0.20
+  }'
 ```
 
 ---
 
-## 3. 行情查询
+### DELETE /targets/{code} — 删除关注标的
 
-### 3.1 查询实时行情 / 估值
-
-统一行情查询入口，根据标的类型和当前时段自动返回不同数据。
-
-```
-GET /quote/{code}
+```bash
+curl -X DELETE http://localhost:8000/targets/600519
 ```
 
-#### 路径参数
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `code` | string | 已关注的标的代码 |
-
-> **前置条件**：标的必须已通过 `/targets/` 接口添加关注，否则返回 404。
-
-#### 行为逻辑
-
-| 标的类型 | 交易时间内 | 非交易时间 |
-|---------|-----------|-----------|
-| `stock` | 返回实时价格 + 技术指标（MA5/MA20/MA250/乖离率） | 返回最近收盘价 |
-| `etf` | 返回实时价格 + 技术指标 | 返回最近收盘价 |
-| `otc` | 返回实时估值（估算净值 + 估算涨跌幅） | 返回最近确认净值 |
+**响应示例：**
+```json
+{"message": "已删除 600519"}
+```
 
 ---
 
-#### 响应示例：个股/ETF — 交易时间内
+### GET /quote/{code} — 查询实时行情
 
-`status` = `"realtime"`
+查询前需先通过 `POST /targets/` 添加该标的。
 
+```bash
+curl http://localhost:8000/quote/600519
+```
+
+**交易时间响应示例（含技术指标）：**
 ```json
 {
   "code": "600519",
@@ -642,272 +326,247 @@ GET /quote/{code}
   "type": "stock",
   "status": "realtime",
   "realtime": {
-    "price": 1688.50,
-    "change_pct": 1.25,
-    "volume": 23456.0,
-    "amount": 39012345.0,
-    "high": 1695.00,
-    "low": 1670.00,
-    "open": 1675.00,
-    "pre_close": 1667.60
+    "price": 1680.5,
+    "change": -12.3,
+    "change_pct": -0.73,
+    "volume": 123456,
+    "amount": 207654321.0
   },
   "indicators": {
-    "price": 1688.5,
-    "ma5": 1680.32,
-    "ma20": 1665.78,
-    "ma250": 1580.45,
-    "bias_rate": 0.0684,
-    "bias_percent": "6.84%"
+    "price": 1680.5,
+    "ma5": 1692.3,
+    "ma20": 1710.8,
+    "ma120": 1748.2,
+    "ma250": 1820.0,
+    "bias_rate": -0.0767,
+    "bias_percent": "-7.67%"
   }
 }
 ```
 
-#### 响应示例：个股/ETF — 非交易时间
-
-`status` = `"closed"`
-
+**非交易时间响应示例：**
 ```json
 {
   "code": "600519",
   "name": "贵州茅台",
   "type": "stock",
   "status": "closed",
-  "close_price": 1688.50,
-  "close_date": "2026-02-24"
-}
-```
-
-#### 响应示例：场外基金 — 交易时间内
-
-`status` = `"estimation"`
-
-```json
-{
-  "code": "012708",
-  "name": "东方红启恒",
-  "type": "otc",
-  "status": "estimation",
-  "data": {
-    "nav": 1.2345,
-    "growth_rate": -1.58,
-    "time": "2026-02-24 14:30:00"
-  }
-}
-```
-
-#### 响应示例：场外基金 — 非交易时间
-
-`status` = `"closed"`
-
-```json
-{
-  "code": "012708",
-  "name": "东方红启恒",
-  "type": "otc",
-  "status": "closed",
-  "data": {
-    "nav": 1.2500,
-    "date": "2026-02-23"
-  }
-}
-```
-
-#### 响应字段说明
-
-**顶层字段：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `code` | string | 标的代码 |
-| `name` | string | 标的名称 |
-| `type` | string | 标的类型：`"stock"` / `"etf"` / `"otc"` |
-| `status` | string | 数据状态：`"realtime"` / `"estimation"` / `"closed"` |
-| `realtime` | object \| null | 实时行情数据（仅 stock/etf 交易时间） |
-| `indicators` | object \| null | 技术指标（仅 stock/etf 交易时间） |
-| `data` | object \| null | 场外基金数据（仅 otc） |
-| `close_price` | float \| null | 收盘价（仅 stock/etf 非交易时间） |
-| `close_date` | string \| null | 收盘日期（仅 stock/etf 非交易时间） |
-
-**`realtime` 对象（个股）：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `price` | float | 最新价 |
-| `change_pct` | float | 涨跌幅（%） |
-| `volume` | float | 成交量 |
-| `amount` | float | 成交额 |
-| `high` | float | 最高价 |
-| `low` | float | 最低价 |
-| `open` | float | 开盘价 |
-| `pre_close` | float | 昨收价 |
-
-**`realtime` 对象（ETF）：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `price` | float | 最新价 |
-| `change_pct` | float | 涨跌幅（%） |
-
-**`indicators` 对象：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `price` | float | 当前价格 |
-| `ma5` | float | 5 日均线 |
-| `ma20` | float | 20 日均线 |
-| `ma250` | float | 250 日均线（年线） |
-| `bias_rate` | float | 乖离率（小数），如 `0.0684` 表示高于年线 6.84% |
-| `bias_percent` | string | 乖离率（百分比格式），如 `"6.84%"` |
-
-**`data` 对象（场外 — 交易时间内）：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `nav` | float | 估算净值 |
-| `growth_rate` | float | 估算涨跌幅（%） |
-| `time` | string | 估值更新时间 |
-
-**`data` 对象（场外 — 非交易时间）：**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `nav` | float | 确认净值 |
-| `date` | string | 净值确认日期 |
-
-#### 错误响应 `404 Not Found`
-
-标的未关注：
-
-```json
-{
-  "detail": "标的 012708 未关注，请先添加"
-}
-```
-
-数据获取失败：
-
-```json
-{
-  "detail": "数据获取失败"
+  "close_price": 1680.5,
+  "close_date": "2024-01-15"
 }
 ```
 
 ---
 
-## 附录 A：数据模型
+### POST /backtest/single — 单标历史回测
 
-### TargetCreate（创建请求）
+对指定标的在历史数据上运行 MA250 乖离率策略回测。
 
-```json
-{
-  "code": "string (必填)",
-  "name": "string (必填)",
-  "type": "string (必填): stock | etf | otc",
-  "buy_bias_rate": "float (选填)",
-  "sell_bias_rate": "float (选填)",
-  "buy_growth_rate": "float (选填)",
-  "sell_growth_rate": "float (选填)"
-}
+```bash
+curl -X POST http://localhost:8000/backtest/single \
+  -H "Content-Type: application/json" \
+  -d '{
+    "code": "600519",
+    "buy_bias_rate": -0.08,
+    "sell_bias_rate": 0.15,
+    "initial_capital": 100000,
+    "start_date": "2020-01-01",
+    "end_date": "2024-01-01"
+  }'
 ```
 
-### TargetUpdate（更新请求）
-
+**响应示例：**
 ```json
 {
-  "name": "string (选填)",
-  "buy_bias_rate": "float (选填)",
-  "sell_bias_rate": "float (选填)",
-  "buy_growth_rate": "float (选填)",
-  "sell_growth_rate": "float (选填)"
-}
-```
-
-### TargetResponse（标的响应）
-
-```json
-{
-  "id": "integer",
-  "code": "string",
-  "name": "string",
-  "type": "string",
-  "buy_bias_rate": "float | null",
-  "sell_bias_rate": "float | null",
-  "buy_growth_rate": "float | null",
-  "sell_growth_rate": "float | null"
-}
-```
-
----
-
-## 附录 B：枚举值
-
-### 标的类型 `TargetTypeEnum`
-
-| 值 | 说明 | 监控方式 | 适用阈值 |
-|----|------|---------|---------|
-| `stock` | A 股个股 | 实时价 → MA250 乖离率 | `buy_bias_rate` / `sell_bias_rate` |
-| `etf` | 场内 ETF | 实时价 → MA250 乖离率 | `buy_bias_rate` / `sell_bias_rate` |
-| `otc` | 场外基金 | 实时估值 → 估算涨跌幅 | `buy_growth_rate` / `sell_growth_rate` |
-
-### 行情状态 `status`
-
-| 值 | 说明 |
-|----|------|
-| `realtime` | 交易时间内，返回个股/ETF 实时数据 |
-| `estimation` | 交易时间内，返回场外基金实时估值 |
-| `closed` | 非交易时间，返回收盘/确认数据 |
-
-### 交易信号 `signal`
-
-| 值 | 说明 |
-|----|------|
-| `BUY` | 买入信号：乖离率 ≤ 买入阈值，或估算涨跌 ≤ 买入阈值 |
-| `SELL` | 卖出信号：乖离率 ≥ 卖出阈值，或估算涨跌 ≥ 卖出阈值 |
-
-> 信号判断优先级：卖出 > 买入（保守策略，优先止盈/止损）。
-> 每个标的每天每个方向最多触发一次报警邮件。
-
----
-
-## 附录 C：错误码
-
-系统遵循标准 HTTP 状态码 + FastAPI 默认错误格式。
-
-| 状态码 | 场景 | 响应体示例 |
-|--------|------|-----------|
-| `200` | 请求成功 | 见各接口响应示例 |
-| `400` | 业务校验失败（如标的已存在） | `{"detail": "标的 600519 已存在"}` |
-| `404` | 资源不存在（标的未找到 / 数据获取失败） | `{"detail": "标的 600519 不存在"}` |
-| `422` | 请求体格式错误 / 字段校验失败 | FastAPI 自动生成的 ValidationError |
-
-### `422` 错误示例
-
-缺少必填字段：
-
-```json
-{
-  "detail": [
+  "code": "600519",
+  "name": "贵州茅台",
+  "type": "stock",
+  "period": {
+    "start": "2020-01-02",
+    "end": "2023-12-29"
+  },
+  "params": {
+    "buy_bias_rate": -0.08,
+    "sell_bias_rate": 0.15,
+    "initial_capital": 100000.0
+  },
+  "summary": {
+    "total_return": 0.3256,
+    "total_return_pct": "32.56%",
+    "annualized_return": 0.0741,
+    "annualized_return_pct": "7.41%",
+    "max_drawdown": -0.1823,
+    "max_drawdown_pct": "-18.23%",
+    "trade_count": 8,
+    "win_rate": 0.75,
+    "win_rate_pct": "75.00%",
+    "final_capital": 132560.0,
+    "benchmark_return": 0.2100,
+    "benchmark_return_pct": "21.00%",
+    "excess_return": 0.1156,
+    "excess_return_pct": "11.56%"
+  },
+  "trades": [
     {
-      "type": "missing",
-      "loc": ["body", "code"],
-      "msg": "Field required",
-      "input": {}
+      "date": "2020-03-23",
+      "action": "BUY",
+      "price": 1012.3,
+      "shares": 900,
+      "amount": 91107.0,
+      "bias_rate": -0.0912,
+      "capital_after": 8893.0
     }
   ]
 }
 ```
 
-枚举值不合法：
+---
 
-```json
-{
-  "detail": [
-    {
-      "type": "enum",
-      "loc": ["body", "type"],
-      "msg": "Input should be 'stock', 'etf' or 'otc'",
-      "input": "bond"
-    }
-  ]
-}
+## 项目结构说明
+
 ```
+myQuant/
+├── .env.example              # 配置模板（安全提交）
+├── .env                      # 实际配置（含密码，不提交到 Git）
+├── .gitignore
+├── Dockerfile                # Docker 镜像构建（Python 3.11-slim）
+├── docker-compose.yml        # Docker Compose 编排配置
+├── requirements.txt          # Python 依赖清单
+├── alembic.ini               # 数据库迁移工具配置
+├── alembic/                  # 数据库迁移脚本目录
+├── tests/                    # 单元测试
+│   ├── conftest.py           # pytest fixtures（共享测试依赖）
+│   ├── test_analyzer.py      # 技术指标计算测试
+│   ├── test_backtest.py      # 回测引擎测试
+│   ├── test_cache.py         # 缓存模块测试
+│   ├── test_data_fetcher.py  # 数据抓取测试（含 Mock）
+│   ├── test_routes.py        # API 路由集成测试
+│   └── test_utils.py         # 工具函数测试
+└── app/
+    ├── main.py               # FastAPI 入口：lifespan 生命周期 + 路由注册 + 异常处理
+    ├── core/
+    │   ├── config.py         # Settings（pydantic-settings），读取 .env 环境变量
+    │   ├── database.py       # SQLAlchemy engine + SessionLocal + init_db
+    │   ├── deps.py           # get_db 依赖注入（FastAPI Depends）
+    │   ├── exceptions.py     # 自定义异常类层级（NotFoundException 等）
+    │   └── logging.py        # 结构化日志（支持 text/json 两种格式）
+    ├── models/
+    │   └── target.py         # ORM 模型：Target（标的表）+ SecurityInfo（代码缓存表）
+    ├── schemas/
+    │   ├── target.py         # Pydantic 模型：TargetCreate / TargetUpdate / TargetResponse
+    │   └── backtest.py       # Pydantic 模型：BacktestRequest / BacktestResponse
+    ├── routes/
+    │   ├── target.py         # 关注标的 CRUD（含批量添加和批量删除）
+    │   ├── quote.py          # 行情查询（智能区分交易时间/非交易时间）
+    │   └── backtest.py       # 回测接口入口（参数校验 + 调用回测引擎）
+    ├── services/
+    │   ├── analyzer.py       # 技术指标：MA5/20/120/250 + 乖离率 + 信号判断
+    │   ├── backtester.py     # 回测引擎：MA250 乖离率策略，全仓买卖，计算完整回测指标
+    │   ├── cache.py          # HistoryCache（K线缓存）+ AlertStateManager（报警去重）
+    │   ├── code_resolver.py  # 证券代码解析：自动识别 stock/etf/otc 及名称
+    │   ├── data_fetcher.py   # 数据抓取：腾讯财经（主）+ 新浪财经（备）+ 天天基金
+    │   ├── monitor.py        # 后台监控主循环：asyncio + 并发扫描 + 邮件报警
+    │   └── notifier.py       # 邮件通知：SMTP SSL 发送，含重试和日志脱敏
+    └── utils/
+        ├── convert.py        # safe_float：安全的字符串转浮点数工具
+        ├── http_client.py    # HTTP 客户端：UA 伪装 + 请求重试策略
+        └── time_utils.py     # 交易时间判断（集成 chinese_calendar 节假日库）
+```
+
+---
+
+## 技术栈
+
+| 类别 | 技术/库 | 用途 |
+|------|---------|------|
+| Web 框架 | [FastAPI](https://fastapi.tiangolo.com/) | REST API + 自动生成 Swagger 文档 |
+| ASGI 服务器 | [Uvicorn](https://www.uvicorn.org/) | 高性能异步 HTTP 服务器 |
+| 数据库 ORM | [SQLAlchemy](https://www.sqlalchemy.org/) | 数据库模型定义和查询 |
+| 数据库 | SQLite | 轻量嵌入式数据库，无需独立部署 |
+| 数据迁移 | [Alembic](https://alembic.sqlalchemy.org/) | 数据库 Schema 版本管理 |
+| 配置管理 | [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) | 从 .env 文件读取配置，类型安全 |
+| 数据处理 | [pandas](https://pandas.pydata.org/) | K 线数据处理和均线计算 |
+| 节假日 | [chinese_calendar](https://github.com/LKI/chinese-calendar) | A 股交易日判断（含法定节假日调休） |
+| HTTP 客户端 | [requests](https://requests.readthedocs.io/) | 抓取外部行情数据 |
+| 测试框架 | [pytest](https://pytest.org/) + [pytest-asyncio](https://pytest-asyncio.readthedocs.io/) | 单元测试和异步测试 |
+| HTTP 测试 | [httpx](https://www.python-httpx.org/) | FastAPI 接口测试客户端 |
+| 容器化 | Docker + Docker Compose | 一键部署和环境隔离 |
+
+---
+
+## 学习文档导航
+
+> 如果你是量化交易初学者，建议按照以下顺序阅读学习文档。
+> 所有文档从零讲起，配合本项目代码，帮助你建立完整的量化交易知识体系。
+
+| 序号 | 文档 | 核心内容 |
+|------|------|---------|
+| 01 | [量化交易入门](docs/01-quant-basics.md) | 什么是量化交易、A 股基础知识、策略分类 |
+| 02 | [技术指标详解](docs/02-technical-indicators.md) | K 线、移动平均线、乖离率的计算原理 |
+| 03 | [MA250 乖离率策略](docs/03-bias-strategy.md) | 本项目核心策略的完整讲解与代码解析 |
+| 04 | [回测入门与实践](docs/04-backtesting-guide.md) | 如何评估策略、解读回测结果 |
+| 05 | [数据源与行情获取](docs/05-data-sources.md) | 数据抓取机制、主备切换、复权说明 |
+| 06 | [风险管理基础](docs/06-risk-management.md) | 仓位管理、止损止盈、最大回撤控制 |
+
+---
+
+## 运行测试
+
+```bash
+# 安装开发依赖（如未安装）
+pip install -r requirements.txt
+
+# 运行全部测试
+pytest tests/ -v
+
+# 运行特定模块的测试
+pytest tests/test_backtest.py -v
+pytest tests/test_analyzer.py -v
+
+# 带覆盖率报告
+pytest tests/ --tb=short -q
+```
+
+测试使用 `unittest.mock` 模拟外部数据源，不依赖网络连接。
+
+---
+
+## 开发路线图
+
+### 已实现 ✅
+- [x] 个股/ETF/场外基金行情监控
+- [x] MA250 乖离率买卖信号
+- [x] 邮件报警（防刷屏去重）
+- [x] RESTful CRUD API
+- [x] 历史回测引擎（MA250 乖离率策略）
+- [x] Docker 容器化部署
+- [x] 结构化日志（text/json）
+
+### 计划中 🚀
+- [ ] 支持更多技术指标（RSI、MACD、布林带）
+- [ ] 场外基金回测支持
+- [ ] 多策略回测对比（参数扫描）
+- [ ] Web 前端界面（行情图表 + 回测结果可视化）
+- [ ] 微信/钉钉通知渠道
+- [ ] 自动止损功能（下单接口对接）
+- [ ] 多账户支持
+
+---
+
+## 常见问题
+
+**Q：轮询间隔设多少合适？**
+> 标的数量少（< 10 个）可设 5~10 秒；标的多（> 20 个）建议 15~30 秒，避免被数据源封 IP。
+
+**Q：HISTORY_LOOKBACK_MONTHS 要设多少？**
+> 计算 MA250 至少需要 250 个交易日的历史数据，约等于 14 个月。建议设 18 以留有余量。
+
+**Q：场外基金回测为什么不支持？**
+> 场外基金按净值申购/赎回，不像股票可以精确按价格买入整手，回测逻辑差异较大，计划后续版本支持。
+
+**Q：非交易时间查询返回什么？**
+> 个股/ETF 返回最近交易日的收盘价；场外基金返回最近一次确认净值。
+
+---
+
+*如有问题或建议，欢迎提 Issue 或 PR。*
