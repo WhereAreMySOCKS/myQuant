@@ -14,6 +14,7 @@ from app.utils import http_client  # noqa: F401 — auto-patch requests on impor
 from app.utils.time_utils import is_trading_time
 from app.routes import target as target_router
 from app.routes import quote as quote_router
+from app.routes import backtest as backtest_router
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ async def app_exception_handler(request: Request, exc: AppException):
 
 app.include_router(target_router.router)
 app.include_router(quote_router.router)
+app.include_router(backtest_router.router)
 
 
 @app.get("/", tags=["系统"])
