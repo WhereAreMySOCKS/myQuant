@@ -1,10 +1,14 @@
 import json
 import re
 import time
+import datetime
 import requests
 import pandas as pd
 import logging
 from typing import Optional
+
+from app.utils.convert import safe_float  # 通用工具，同时保留下方别名以向后兼容
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,21 +24,84 @@ _SINA_HISTORY_URL = (
 _TIANTIAN_ESTIMATION_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 _TIANTIAN_HISTORY_URL = "https://api.fund.eastmoney.com/f10/lsjz"
 
+# 各数据源健康状态：记录最后一次成功/失败时间
+_DATASOURCE_STATUS: dict = {
+    "tencent_realtime": {"last_success": None, "last_failure": None},
+    "tencent_history": {"last_success": None, "last_failure": None},
+    "sina_history": {"last_success": None, "last_failure": None},
+    "tiantian_estimation": {"last_success": None, "last_failure": None},
+    "tiantian_history_nav": {"last_success": None, "last_failure": None},
+}
 
-def safe_float(val, default=0.0) -> float:
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
+
+def _mark_source_ok(source: str) -> None:
+    """记录数据源请求成功。"""
+    if source in _DATASOURCE_STATUS:
+        _DATASOURCE_STATUS[source]["last_success"] = datetime.datetime.now()
+
+
+def _mark_source_fail(source: str) -> None:
+    """记录数据源请求失败。"""
+    if source in _DATASOURCE_STATUS:
+        _DATASOURCE_STATUS[source]["last_failure"] = datetime.datetime.now()
 
 
 def _exchange_prefix(code: str) -> str:
-    """根据代码首字符判断交易所前缀 sh/sz"""
-    return "sh" if code[0] in ("6", "5") else "sz"
+    """根据证券代码判断交易所前缀。
+
+    规则：
+    - 上交所 (sh): 6xxxxx（主板）、5xxxxx（上交所ETF/LOF）、688xxx（科创板）
+    - 北交所 (bj): 8xxxxx、4xxxxx
+    - 深交所 (sz): 其余（主板 000/001、中小板 002/003、创业板 300/301 等）
+
+    Args:
+        code: 六位证券代码字符串。
+
+    Returns:
+        交易所前缀字符串：'sh'、'sz' 或 'bj'。
+    """
+    if not code:
+        return "sz"
+    first = code[0]
+    if first in ("6", "5"):
+        return "sh"
+    if first in ("8", "4"):
+        return "bj"
+    return "sz"
+
+
+def _history_start_date() -> str:
+    """根据配置动态计算历史K线拉取起始日期。
+
+    Returns:
+        格式为 'YYYY-MM-DD' 的起始日期字符串。
+    """
+    months = settings.HISTORY_LOOKBACK_MONTHS
+    today = datetime.date.today()
+    # 往前推 months 个月（简单按 30 天/月近似，再 clamp 到月份边界）
+    year = today.year - months // 12
+    month = today.month - months % 12
+    if month <= 0:
+        month += 12
+        year -= 1
+    # 取该月 1 日作为起始
+    start = datetime.date(year, month, 1)
+    return start.strftime("%Y-%m-%d")
 
 
 def _get(url: str, **kwargs) -> requests.Response:
-    """带重试的 GET 请求"""
+    """带重试的 GET 请求。
+
+    Args:
+        url: 请求地址。
+        **kwargs: 透传给 requests.get 的额外参数。
+
+    Returns:
+        成功的 Response 对象。
+
+    Raises:
+        最后一次请求的异常。
+    """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(url, timeout=10, **kwargs)
@@ -63,11 +130,9 @@ def fetch_stock_realtime(code: str) -> dict | None:
     try:
         resp = _get(url)
         text = resp.text
-        # 格式: v_sz000001="1~平安银行~000001~...~涨跌幅~..."
         m = re.search(r'"([^"]+)"', text)
         if m:
             fields = m.group(1).split("~")
-            # 腾讯财经字段索引: 3=现价, 4=昨收, 5=今开, 8=涨跌, 31=涨跌幅(%), 36=成交量(手), 37=成交额(元), 33=最高, 34=最低
             if len(fields) > 37:
                 price = safe_float(fields[3])
                 result = {
@@ -80,10 +145,13 @@ def fetch_stock_realtime(code: str) -> dict | None:
                     "open": safe_float(fields[5]),
                     "pre_close": safe_float(fields[4]),
                 }
+                _mark_source_ok("tencent_realtime")
                 logger.debug(f"[stock_realtime] {code} 腾讯接口成功: 价格={price}, 耗时={time.time()-t0:.2f}s")
                 return result
         logger.warning(f"[stock_realtime] {code} 腾讯接口返回数据解析失败: {text[:80]}")
+        _mark_source_fail("tencent_realtime")
     except Exception as e:
+        _mark_source_fail("tencent_realtime")
         logger.warning(f"[stock_realtime] {code} 腾讯接口失败: {e}")
 
     # 兜底: 历史K线最后一行收盘价
@@ -117,8 +185,9 @@ def _fetch_history_tencent(code: str, asset_type: str) -> pd.DataFrame | None:
     asset_type: 'stock' 或 'etf'
     """
     prefix = _exchange_prefix(code)
+    start_date = _history_start_date()
     params = {
-        "param": f"{prefix}{code},day,2023-01-01,,320,qfq",
+        "param": f"{prefix}{code},day,{start_date},,320,qfq",
         "_": int(time.time() * 1000),
     }
     try:
@@ -130,10 +199,10 @@ def _fetch_history_tencent(code: str, asset_type: str) -> pd.DataFrame | None:
             or data.get("data", {}).get(symbol_key, {}).get("day")
         )
         if not qfq:
+            _mark_source_fail("tencent_history")
             return None
         rows = []
         for item in qfq:
-            # [日期, 开, 收, 高, 低, 成交量]
             rows.append({
                 "日期": pd.to_datetime(item[0]),
                 "开盘": safe_float(item[1]),
@@ -143,8 +212,10 @@ def _fetch_history_tencent(code: str, asset_type: str) -> pd.DataFrame | None:
                 "成交量": safe_float(item[5]),
             })
         df = pd.DataFrame(rows).sort_values("日期").reset_index(drop=True)
+        _mark_source_ok("tencent_history")
         return df
     except Exception as e:
+        _mark_source_fail("tencent_history")
         logger.warning(f"[history_tencent] {code} 腾讯K线失败: {e}")
         return None
 
@@ -152,18 +223,20 @@ def _fetch_history_tencent(code: str, asset_type: str) -> pd.DataFrame | None:
 def _fetch_history_sina(code: str) -> pd.DataFrame | None:
     """备用：新浪财经历史K线"""
     prefix = _exchange_prefix(code)
+    start_date = _history_start_date().replace("-", "")
     params = {
         "symbol": f"{prefix}{code}",
         "type": "D",
         "dateback": 0,
         "num": 800,
-        "start": "20230101",
+        "start": start_date,
         "end": "30000101",
     }
     try:
         resp = _get(_SINA_HISTORY_URL, params=params)
         data = resp.json()
         if not data:
+            _mark_source_fail("sina_history")
             return None
         rows = []
         for item in data:
@@ -176,8 +249,10 @@ def _fetch_history_sina(code: str) -> pd.DataFrame | None:
                 "成交量": safe_float(item["v"]),
             })
         df = pd.DataFrame(rows).sort_values("日期").reset_index(drop=True)
+        _mark_source_ok("sina_history")
         return df
     except Exception as e:
+        _mark_source_fail("sina_history")
         logger.warning(f"[history_sina] {code} 新浪K线失败: {e}")
         return None
 
@@ -233,10 +308,13 @@ def fetch_etf_realtime(code: str) -> dict | None:
                     "price": price,
                     "change_pct": safe_float(fields[31]),
                 }
+                _mark_source_ok("tencent_realtime")
                 logger.debug(f"[etf_realtime] {code} 腾讯接口成功: 价格={price}, 耗时={time.time()-t0:.2f}s")
                 return result
         logger.warning(f"[etf_realtime] {code} 腾讯接口返回数据解析失败: {text[:80]}")
+        _mark_source_fail("tencent_realtime")
     except Exception as e:
+        _mark_source_fail("tencent_realtime")
         logger.warning(f"[etf_realtime] {code} 腾讯接口失败: {e}")
 
     # 备用: 历史K线最后一行
@@ -294,15 +372,16 @@ def fetch_otc_estimation(code: str) -> dict | None:
     try:
         resp = _get(url)
         text = resp.text
-        # 格式: jsonpgz({"fundcode":"...","name":"...","gsz":"1.234","gszzl":"0.56","gztime":"..."})
         m = re.search(r'jsonpgz\((\{.*\})\)', text)
         if not m:
             logger.warning(f"[otc_estimation] {code} 天天基金接口返回数据解析失败: {text[:80]}")
+            _mark_source_fail("tiantian_estimation")
             return None
         obj = json.loads(m.group(1))
         nav = safe_float(obj.get("gsz"))
         growth_rate = safe_float(obj.get("gszzl"))
         est_time = str(obj.get("gztime", ""))
+        _mark_source_ok("tiantian_estimation")
         logger.debug(f"[otc_estimation] {code} 获取成功: 估算净值={nav}, 估算增长率={growth_rate}%, 耗时={time.time()-t0:.2f}s")
         return {
             "nav": nav,
@@ -310,6 +389,7 @@ def fetch_otc_estimation(code: str) -> dict | None:
             "time": est_time,
         }
     except Exception as e:
+        _mark_source_fail("tiantian_estimation")
         logger.error(f"[otc_estimation] {code} 场外估值获取失败, 耗时={time.time()-t0:.2f}s", exc_info=True)
         return None
 
@@ -331,15 +411,19 @@ def fetch_otc_history_nav(code: str) -> dict | None:
         records = data.get("Data", {}).get("LSJZList", [])
         if not records:
             logger.warning(f"[otc_history_nav] {code} 场外历史净值为空")
+            _mark_source_fail("tiantian_history_nav")
             return None
         last = records[0]
         nav = safe_float(last.get("DWJZ"))
         date = str(last.get("FSRQ", ""))
+        _mark_source_ok("tiantian_history_nav")
         logger.debug(f"[otc_history_nav] {code} 获取成功: 净值={nav}, 日期={date}, 耗时={time.time()-t0:.2f}s")
         return {
             "nav": nav,
             "date": date,
         }
     except Exception as e:
+        _mark_source_fail("tiantian_history_nav")
         logger.error(f"[otc_history_nav] {code} 场外历史净值获取失败, 耗时={time.time()-t0:.2f}s", exc_info=True)
         return None
+

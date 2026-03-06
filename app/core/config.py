@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # 监控轮询间隔（秒）
     # akshare 免费接口有频率限制，标的少可以 3~5 秒，多的话 10~15 秒
     POLL_INTERVAL_SECONDS: int = 30
+    # 并发处理标的数
+    MONITOR_CONCURRENCY: int = 5
+    # 历史数据回溯月数
+    HISTORY_LOOKBACK_MONTHS: int = 18
 
     # SQLite 数据库路径
     DATABASE_URL: str = "sqlite:///./data/investment_guard.db"
