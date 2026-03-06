@@ -8,6 +8,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # IDE
 .idea/
@@ -22,3 +25,10 @@ logs/
 # 虚拟环境
 venv/
 .venv/
+
+# 数据库文件
+data/*.db
+
+# alembic
+alembic/versions/*.py
+!alembic/versions/.gitkeep

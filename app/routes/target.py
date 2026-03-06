@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from typing import List
 import logging
 
-from app.database import get_db, Target, TargetType, SecurityInfo
-from app.models import TargetCreate, TargetUpdate, TargetResponse
-from app.utils import get_current_time
+from app.core.deps import get_db
+from app.core.exceptions import NotFoundException, DuplicateException, ServiceException
+from app.models.target import Target, TargetType
+from app.schemas.target import TargetCreate, TargetUpdate, TargetResponse
+from app.utils.time_utils import get_current_time
 from app.services.code_resolver import resolve_code
 
 logger = logging.getLogger(__name__)
@@ -25,11 +27,11 @@ def create_target(payload: TargetCreate, db: Session = Depends(get_db)):
     """
     existing = db.query(Target).filter(Target.code == payload.code).first()
     if existing:
-        raise HTTPException(400, f"标的 {payload.code} 已存在")
+        raise DuplicateException(f"标的 {payload.code} 已存在")
 
     resolved = resolve_code(payload.code)
     if not resolved:
-        raise HTTPException(404, f"无法识别代码 {payload.code}，请确认代码是否正确")
+        raise NotFoundException(f"无法识别代码 {payload.code}，请确认代码是否正确")
 
     target = Target(
         code=resolved["code"],
@@ -52,13 +54,14 @@ def create_target(payload: TargetCreate, db: Session = Depends(get_db)):
 @router.get("/", response_model=List[TargetResponse], summary="获取所有关注标的")
 def list_targets(db: Session = Depends(get_db)):
     return db.query(Target).all()
+
+
 @router.delete("/all", summary="清空所有关注标的")
 def delete_all_targets(db: Session = Depends(get_db)):
     """
     一键删除数据库中所有的关注标的
     """
     try:
-        # 批量删除 Target 表中的所有记录
         deleted_count = db.query(Target).delete()
         db.commit()
 
@@ -68,42 +71,7 @@ def delete_all_targets(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         logger.error(f"[target] 清空关注标的失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="清空关注标的失败，请查看日志")
-
-@router.get("/{code}", response_model=TargetResponse, summary="查询单个标的")
-def get_target(code: str, db: Session = Depends(get_db)):
-    target = db.query(Target).filter(Target.code == code).first()
-    if not target:
-        raise HTTPException(404, f"标的 {code} 不存在")
-    return target
-
-
-@router.put("/{code}", response_model=TargetResponse, summary="修改标的阈值")
-def update_target(code: str, payload: TargetUpdate, db: Session = Depends(get_db)):
-    target = db.query(Target).filter(Target.code == code).first()
-    if not target:
-        raise HTTPException(404, f"标的 {code} 不存在")
-
-    update_data = payload.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(target, key, value)
-
-    db.commit()
-    db.refresh(target)
-    return target
-
-
-@router.delete("/{code}", summary="删除关注标的")
-def delete_target(code: str, db: Session = Depends(get_db)):
-    target = db.query(Target).filter(Target.code == code).first()
-    if not target:
-        raise HTTPException(404, f"标的 {code} 不存在")
-
-    db.delete(target)
-    db.commit()
-    return {"message": f"已删除 {code}"}
-
-
+        raise ServiceException("清空关注标的失败，请查看日志")
 
 
 @router.post("/batch", response_model=List[TargetResponse], summary="批量新增关注")
@@ -151,3 +119,37 @@ def batch_create_targets(
 
     logger.info(f"[batch_create] 批量新增完成: 成功 {len(results)}/{len(payloads)} 个")
     return results
+
+
+@router.get("/{code}", response_model=TargetResponse, summary="查询单个标的")
+def get_target(code: str, db: Session = Depends(get_db)):
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise NotFoundException(f"标的 {code} 不存在")
+    return target
+
+
+@router.put("/{code}", response_model=TargetResponse, summary="修改标的阈值")
+def update_target(code: str, payload: TargetUpdate, db: Session = Depends(get_db)):
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise NotFoundException(f"标的 {code} 不存在")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(target, key, value)
+
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@router.delete("/{code}", summary="删除关注标的")
+def delete_target(code: str, db: Session = Depends(get_db)):
+    target = db.query(Target).filter(Target.code == code).first()
+    if not target:
+        raise NotFoundException(f"标的 {code} 不存在")
+
+    db.delete(target)
+    db.commit()
+    return {"message": f"已删除 {code}"}

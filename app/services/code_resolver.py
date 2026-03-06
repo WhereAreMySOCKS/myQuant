@@ -4,7 +4,8 @@ import logging
 from typing import Optional, Callable, List
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal, SecurityInfo
+from app.core.database import SessionLocal
+from app.models.target import SecurityInfo
 
 logger = logging.getLogger(__name__)
 
