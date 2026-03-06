@@ -10,7 +10,6 @@
   - API 端点（mock data_fetcher 和 code_resolver）
 """
 
-import asyncio
 import pytest
 import pandas as pd
 import numpy as np
